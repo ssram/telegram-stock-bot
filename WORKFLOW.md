@@ -20,10 +20,19 @@ database, and is controlled through Telegram commands.
 ## 2. Architecture
 
 ```
-Telegram command
+Telegram message
       |
       v
-GitHub Actions: Telegram Command Listener   (polls every 5 min)
+Telegram webhook (instant push)
+      |
+      v
+Cloudflare Worker (receives webhook, forwards to GitHub)
+      |
+      v
+GitHub repository_dispatch event
+      |
+      v
+GitHub Actions: Telegram Command Handler   (runs within seconds)
       |
       +--> reads/writes -->  Google Sheet (Holdings tab + Watchlist tab)
       |
@@ -36,26 +45,27 @@ Two independent GitHub Actions workflows exist:
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `telegram_listener.yml` | Cron (every 5 min) + manual | Polls Telegram for new commands, dispatches to the right action |
+| `telegram_command.yml` | `repository_dispatch` (instant) + manual | Handles a single Telegram command the moment it arrives |
 | `scheduled_scan.yml` | Manual only (`workflow_dispatch`) | Runs the holdings scan on demand; no longer runs automatically |
 
 > Automatic daily scanning was intentionally removed — all scans (holdings
 > or watchlist) now only happen when triggered by a `/scan`-type command
 > in Telegram, or manually from the Actions tab.
 
-### Why polling instead of instant webhooks
+### Why event-driven instead of polling
 
-GitHub Actions has no persistent server to receive Telegram messages in
-real time, so `telegram_listener.yml` polls Telegram's `getUpdates` API on
-a schedule instead. This means there's a **lag of up to ~5 minutes**
-between sending a command and getting a response — acceptable for this
-use case, since nothing here is time-critical to the second.
+GitHub Actions has no persistent server to receive Telegram messages
+directly, so a small piece of infrastructure sits in between: a
+Cloudflare Worker (free tier) receives Telegram's webhook the instant a
+message arrives, and immediately forwards it to GitHub via the
+`repository_dispatch` API, which triggers `telegram_command.yml` within
+seconds.
 
-A webhook-based instant-response alternative (Telegram → Cloudflare
-Worker → GitHub `repository_dispatch`) was designed but is currently on
-hold; it removes the polling lag entirely at the cost of one extra free
-Cloudflare account. See "Future: instant response" below if this becomes
-worth revisiting.
+This replaced an earlier polling design (`telegram_listener.yml`, which
+checked Telegram every 5 minutes via cron). Polling worked but added up
+to ~5 minutes of lag per command; the event-driven design removes that
+lag entirely, at the cost of one extra free Cloudflare account and a
+one-time webhook registration step (see Setup below).
 
 ---
 
@@ -135,12 +145,12 @@ message instead of failing silently (e.g. `/addst` alone replies with
 | File | Purpose |
 |---|---|
 | `sheets.py` | All Google Sheet reads/writes — holdings CRUD, watchlist CRUD, company-info lookup via yfinance |
-| `telegram_bot.py` | Sends messages/documents to Telegram, polls for new updates |
+| `telegram_bot.py` | Sends messages/documents to Telegram |
 | `weinstein_scanner.py` | Core Weinstein Stage Analysis logic; `run_scan()` for holdings, `run_watchlist_scan()` for watchlist |
-| `listener.py` | Parses incoming Telegram commands, enforces the allowlist, dispatches to the right handler |
-| `.github/workflows/telegram_listener.yml` | Polls for commands every 5 minutes |
+| `handle_command.py` | Processes a single incoming Telegram command, enforces the allowlist, dispatches to the right handler |
+| `cloudflare-worker/worker.js` | Receives Telegram's webhook instantly, forwards the command to GitHub via `repository_dispatch` |
+| `.github/workflows/telegram_command.yml` | Runs `handle_command.py` the instant a command arrives |
 | `.github/workflows/scheduled_scan.yml` | Manual-only holdings scan trigger |
-| `last_update_id.txt` | Tracks which Telegram messages have already been processed (auto-committed by the listener workflow) |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Prevents accidental commits of local secrets/test files |
 
@@ -161,50 +171,93 @@ Set under repo → **Settings → Secrets and variables → Actions**:
 None of these ever appear in code — every value is read via `os.environ`
 at runtime, which is what makes it safe to keep this repo **public**.
 
+### Cloudflare Worker secrets (separate from GitHub)
+
+Set under the Worker's **Settings → Variables and Secrets** in the
+Cloudflare dashboard:
+
+| Secret | Used for |
+|---|---|
+| `GITHUB_REPO` | e.g. `your-username/telegram-stock-bot` — tells the Worker which repo to dispatch to |
+| `GITHUB_TOKEN` | A GitHub Personal Access Token with `repo` scope, so the Worker can trigger the workflow |
+
 ---
 
-## 7. Testing changes safely
+## 7. Setting up the event-driven pipeline (one-time)
 
-Since all `workflow_dispatch`-triggered workflows let you pick a branch to
-run from, changes can be tested without touching `main`:
+1. **Deploy the Worker**: go to [dash.cloudflare.com](https://dash.cloudflare.com)
+   (free account) → **Workers & Pages** → **Create Worker** → paste in the
+   contents of `cloudflare-worker/worker.js` → **Deploy**.
+2. **Add the Worker's secrets** (`GITHUB_REPO`, `GITHUB_TOKEN`) under its
+   **Settings → Variables and Secrets**.
+3. **Register the webhook** with Telegram — visit this URL once (browser
+   or curl), replacing the placeholders:
+   ```
+   https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>
+   ```
+   A successful response looks like `{"ok":true,"result":true,"description":"Webhook was set"}`.
+4. **Test it**: send `/help` in Telegram. A new run should appear in the
+   repo's **Actions** tab under **Telegram Command Handler**, triggered by
+   `repository_dispatch`, within a few seconds.
 
+To confirm the webhook is correctly registered at any time:
+```
+https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo
+```
+
+To remove the webhook (e.g. to temporarily fall back to manual testing):
+```
+https://api.telegram.org/bot<BOT_TOKEN>/deleteWebhook
+```
+
+---
+
+## 8. Testing changes safely
+
+`repository_dispatch` always targets the **default branch** (`main`) —
+unlike `schedule`, it has no concept of "run this on branch X." So to
+test changes to `handle_command.py` or related files before merging:
+
+**Option A — manual test via `workflow_dispatch` on a branch:**
 ```bash
 git checkout -b test-branch-name
 # make changes, commit, push
 ```
-Then in the Actions tab: select the workflow → **Run workflow** → choose
-`test-branch-name` from the branch dropdown.
+Then in the Actions tab: **Telegram Command Handler** → **Run workflow**
+→ pick `test-branch-name` from the branch dropdown → enter a command in
+the `command_text` input (e.g. `/liststocks`) → **Run workflow**.
 
-Note: the **scheduled** trigger (`schedule:` cron) always runs whatever is
-on the default branch (`main`), regardless of other branches — so testing
-on a branch never interferes with production polling.
+Note: this bypasses the allowlist check (no real `USER_ID` is available
+from a manual run), so it always executes — fine for testing logic, but
+remember it still touches the real Sheet and real Telegram chat.
 
-Caveat: there's no sandboxed data — a test run still writes to the real
-Google Sheet and posts to the real Telegram chat, since both are shared
-resources regardless of which branch triggered the run.
+**Option B — merge to `main` and test live** once you're confident,
+since real Telegram commands can only ever trigger the default branch's
+code anyway.
+
+Caveat either way: there's no sandboxed data — testing always writes to
+the real Google Sheet and posts to the real Telegram chat, since both are
+shared resources regardless of which branch or trigger ran the code.
 
 ---
 
-## 8. Known limitations
+## 9. Known limitations
 
-- **Polling lag**: up to ~5 minutes between sending a command and getting
-  a response, since there's no instant webhook (see Architecture above).
 - **yfinance on shared runners**: GitHub Actions runners share IPs, which
   can occasionally get rate-limited by Yahoo Finance. If scans start
   failing intermittently, adding a short delay between symbol lookups in
   `weinstein_scanner.py` is the usual fix.
 - **No sandboxed test environment**: testing always touches the real
   Sheet and real Telegram chat (see above).
+- **Cloudflare Worker is a second point of failure**: if the Worker goes
+  down or its GitHub token expires, commands silently stop reaching
+  GitHub. Worth periodically checking `getWebhookInfo` (see Setup) for
+  delivery errors if commands seem to stop working.
+- **GitHub token expiry**: personal access tokens can be set to expire;
+  if the Worker suddenly stops forwarding commands, a stale/expired
+  `GITHUB_TOKEN` secret in Cloudflare is the first thing to check.
 
 ---
-
-## 9. Future: instant response (on hold)
-
-To remove the 5-minute polling lag entirely, replace `telegram_listener.yml`'s
-cron trigger with an event-driven `repository_dispatch` trigger, fed by a
-small free Cloudflare Worker that receives Telegram's webhook instantly
-and forwards the command to GitHub. This was designed but deliberately
-not deployed yet — revisit if response time becomes a real pain point.
 
 ## 10. Future: order placement (planned)
 

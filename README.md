@@ -1,12 +1,15 @@
 # Telegram Weinstein Stage Scanner
 
-A GitHub-hosted stock scanner that:
-- Runs a daily Weinstein Stage Analysis scan on a schedule
-- Lets your team manage the tracked stock list via Telegram commands
+A GitHub-hosted stock tracking tool that:
+- Runs Weinstein Stage Analysis on your holdings or watchlist, on demand
+- Lets your team manage both lists via Telegram commands
 - Stores all stock data in a Google Sheet
-- Posts results and confirmations back to a shared Telegram chat
+- Responds within seconds via an event-driven pipeline (Telegram webhook → Cloudflare Worker → GitHub Actions)
 
-No server required — everything runs on GitHub Actions' free tier.
+No server to maintain — GitHub Actions (free tier) + a free Cloudflare Worker.
+
+For full architecture details, the complete command reference, and known
+limitations, see **[WORKFLOW.md](./WORKFLOW.md)**. This file covers setup only.
 
 ---
 
@@ -40,6 +43,7 @@ Collect all IDs into a comma-separated list, e.g. `111111111,222222222`. This be
 5. Open the JSON file, find the `client_email` field (looks like `xxx@xxx.iam.gserviceaccount.com`).
 6. Share your Google Sheet with that email address, with **Editor** access.
 7. Leave the sheet's first tab empty — the code creates the header row automatically on first run.
+   The Watchlist tab is also auto-created the first time it's needed.
 
 ## 5. Add GitHub Secrets
 
@@ -55,14 +59,25 @@ Go to your repo → **Settings → Secrets and variables → Actions → New rep
 
 These are encrypted by GitHub and never appear in logs or code, even on a public repo.
 
-## 6. Enable the workflows
+## 6. Deploy the Cloudflare Worker (event-driven pipeline)
 
-Both workflows are already set up in `.github/workflows/`:
-- `scheduled_scan.yml` — runs the scan daily at 9:00 AM IST on weekdays
-- `telegram_listener.yml` — polls for new Telegram commands every 5 minutes during market hours (weekdays, 8am-9pm IST)
+This is what lets Telegram trigger GitHub Actions instantly instead of waiting on a schedule.
 
-They'll start running automatically once pushed to GitHub, on the schedules defined.
-You can also trigger either manually: repo → **Actions** tab → select the workflow → **Run workflow**.
+1. Go to [dash.cloudflare.com](https://dash.cloudflare.com) → sign up free → **Workers & Pages** → **Create Worker**.
+2. Replace the default code with the contents of `cloudflare-worker/worker.js` from this repo → **Deploy**.
+3. In the Worker's **Settings → Variables and Secrets**, add:
+
+   | Secret | Value |
+   |---|---|
+   | `GITHUB_REPO` | `your-username/your-repo-name` |
+   | `GITHUB_TOKEN` | A GitHub Personal Access Token with `repo` scope (Settings → Developer settings → Personal access tokens) |
+
+4. Copy the Worker's URL (looks like `https://your-worker.your-subdomain.workers.dev`).
+5. Register it as your bot's webhook — visit this URL once (browser or curl):
+   ```
+   https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>
+   ```
+   You should see `{"ok":true,"result":true,"description":"Webhook was set"}`.
 
 ## 7. Try it out
 
@@ -70,13 +85,18 @@ In your Telegram group, send:
 
 ```
 /help
-/addstock RELIANCE 10 1350 1300 LongTerm
-/liststocks
-/scan
+/addst RELIANCE 10 1350 1300 LongTerm
+/listst
+/scnst
 ```
 
-`/addstock` args are: `SYMBOL QUANTITY PRICE STOPLOSS INVESTTYPE`
-(fullname, sector, and industry are auto-filled from Yahoo Finance; cmp and stage are auto-filled on the next scan.)
+You should get a reply within a few seconds — check the repo's **Actions** tab
+to see the corresponding run under **Telegram Command Handler**.
+
+`/addst` args are: `SYMBOL QUANTITY PRICE STOPLOSS INVESTTYPE`
+(fullname, sector, and industry are auto-filled from Yahoo Finance; cmp and stage are filled in after a scan.)
+
+See `WORKFLOW.md` for the full command list (holdings + watchlist, short and long forms).
 
 ---
 
@@ -84,17 +104,17 @@ In your Telegram group, send:
 
 | File | Purpose |
 |---|---|
-| `sheets.py` | Reads/writes the Google Sheet (add, update, remove, list stocks) |
-| `telegram_bot.py` | Sends messages/files to Telegram, polls for new messages |
-| `weinstein_scanner.py` | Runs the Weinstein Stage Analysis over all tracked symbols |
-| `listener.py` | Parses Telegram commands and dispatches to the right action |
-| `.github/workflows/scheduled_scan.yml` | Daily automatic scan |
-| `.github/workflows/telegram_listener.yml` | Polls for Telegram commands |
-| `last_update_id.txt` | Tracks which Telegram messages have already been processed (auto-created) |
+| `sheets.py` | Reads/writes the Google Sheet — holdings and watchlist |
+| `telegram_bot.py` | Sends messages/files to Telegram |
+| `weinstein_scanner.py` | Runs the Weinstein Stage Analysis over holdings or watchlist |
+| `handle_command.py` | Processes one incoming Telegram command and dispatches to the right action |
+| `cloudflare-worker/worker.js` | Receives Telegram's webhook, forwards it to GitHub |
+| `.github/workflows/telegram_command.yml` | Runs instantly when a command arrives |
+| `.github/workflows/scheduled_scan.yml` | Manual-only scan trigger (no automatic schedule) |
 
 ## Notes & limits
 
 - **yfinance on GitHub Actions**: shared runner IPs occasionally get rate-limited by Yahoo Finance. If scans start failing, add a short `time.sleep()` between symbol lookups in `weinstein_scanner.py`.
-- **Polling lag**: commands can take up to ~5 minutes to be picked up. If you need instant responses later, migrate `listener.py` to a webhook-based trigger (ask if you want this).
 - **Never commit real secrets** into any `.py` file — always read them via `os.environ`, as already done throughout this codebase.
 - If a secret is ever accidentally committed, revoke and regenerate it immediately (for the bot token: message @BotFather → `/revoke`) rather than just deleting it from a later commit.
+- If commands stop getting replies, check `https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo` for delivery errors, and confirm the Worker's `GITHUB_TOKEN` hasn't expired.
