@@ -1,31 +1,22 @@
-/**
- * Telegram webhook receiver -> GitHub repository_dispatch forwarder
- * ====================================================================
- * Deploy this as a Cloudflare Worker (free tier). Telegram calls this
- * Worker the instant a message arrives; the Worker immediately forwards
- * the command to GitHub, which triggers the "Telegram Command Handler"
- * workflow within seconds.
- *
- * Required Worker secrets (set in Cloudflare dashboard -> Settings ->
- * Variables and Secrets, or via `wrangler secret put`):
- *   GITHUB_REPO   e.g. "your-username/telegram-stock-bot"
- *   GITHUB_TOKEN  a GitHub Personal Access Token with `repo` scope
- *
- * After deploying, register this Worker's URL as your bot's webhook:
- *   https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>
- */
-
 export default {
-  async fetch(request, env) {
+async fetch(request, env) {
     if (request.method !== "POST") {
       return new Response("ok");
+    }
+
+    const expectedSecret = (env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+    const receivedSecret = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+
+    if (!expectedSecret || receivedSecret !== expectedSecret) {
+      console.log("Rejected request: invalid or missing secret token");
+      return new Response("unauthorized", { status: 401 });
     }
 
     let update;
     try {
       update = await request.json();
     } catch (e) {
-      return new Response("ok"); // ignore malformed payloads
+      return new Response("ok");
     }
 
     const message = update.message;
@@ -38,12 +29,15 @@ export default {
     const username = message.from ? (message.from.username || "unknown") : "unknown";
 
     try {
-      const resp = await fetch(
-        `https://api.github.com/repos/${env.GITHUB_REPO}/dispatches`,
+const cleanRepo = (env.GITHUB_REPO || "").trim();
+const dispatchUrl = `https://api.github.com/repos/${cleanRepo}/dispatches`;
+console.log("Full dispatch URL:", dispatchUrl);
+const resp = await fetch(
+  dispatchUrl,
         {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
+            "Authorization": `Bearer ${(env.GITHUB_TOKEN || "").trim()}`,
             "Accept": "application/vnd.github+json",
             "User-Agent": "telegram-webhook-worker",
             "Content-Type": "application/json",
@@ -62,8 +56,6 @@ export default {
       console.log("Error forwarding to GitHub:", err);
     }
 
-    // Always return 200 to Telegram quickly, regardless of GitHub's response,
-    // so Telegram doesn't retry-storm this webhook.
     return new Response("ok");
   },
 };

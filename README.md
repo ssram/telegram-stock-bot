@@ -9,7 +9,9 @@ A GitHub-hosted stock tracking tool that:
 No server to maintain — GitHub Actions (free tier) + a free Cloudflare Worker.
 
 For full architecture details, the complete command reference, and known
-limitations, see **[WORKFLOW.md](./WORKFLOW.md)**. This file covers setup only.
+limitations, see **[WORKFLOW.md](./WORKFLOW.md)**. For fixing things when
+they break, see **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)**. This file
+covers setup only.
 
 ---
 
@@ -69,15 +71,29 @@ This is what lets Telegram trigger GitHub Actions instantly instead of waiting o
 
    | Secret | Value |
    |---|---|
-   | `GITHUB_REPO` | `your-username/your-repo-name` |
-   | `GITHUB_TOKEN` | A GitHub Personal Access Token with `repo` scope (Settings → Developer settings → Personal access tokens) |
+   | `GITHUB_REPO` | `your-username/your-repo-name` — exactly this, no `https://`, no `/repos/` prefix |
+   | `GITHUB_TOKEN` | A GitHub Personal Access Token with full **`repo`** scope (`public_repo` alone has been found insufficient) |
+   | `TELEGRAM_WEBHOOK_SECRET` | Any random string — generate one with `-join ((48..57) + (65..90) + (97..122) \| Get-Random -Count 32 \| ForEach-Object {[char]$_})` in PowerShell. Save it in a password manager, you'll need it again below. |
 
 4. Copy the Worker's URL (looks like `https://your-worker.your-subdomain.workers.dev`).
-5. Register it as your bot's webhook — visit this URL once (browser or curl):
+5. Register it as your bot's webhook, including the secret token so Telegram sends it back on every request:
    ```
-   https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>
+   https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=<WORKER_URL>&secret_token=<YOUR_RANDOM_SECRET>
    ```
    You should see `{"ok":true,"result":true,"description":"Webhook was set"}`.
+
+### Redeploying on a new machine
+
+Both `worker.js` and `wrangler.toml` are committed in `cloudflare-worker/`,
+so setting this up again (new machine, or after a hardware swap) is just:
+```bash
+cd cloudflare-worker
+npm install -g wrangler
+wrangler login
+wrangler deploy
+```
+Then re-add the three secrets above from your password manager — no need
+to rediscover any of the setup issues documented in `TROUBLESHOOTING.md`.
 
 ## 7. Try it out
 
@@ -115,6 +131,6 @@ See `WORKFLOW.md` for the full command list (holdings + watchlist, short and lon
 ## Notes & limits
 
 - **yfinance on GitHub Actions**: shared runner IPs occasionally get rate-limited by Yahoo Finance. If scans start failing, add a short `time.sleep()` between symbol lookups in `weinstein_scanner.py`.
-- **Never commit real secrets** into any `.py` file — always read them via `os.environ`, as already done throughout this codebase.
-- If a secret is ever accidentally committed, revoke and regenerate it immediately (for the bot token: message @BotFather → `/revoke`) rather than just deleting it from a later commit.
-- If commands stop getting replies, check `https://api.telegram.org/bot<BOT_TOKEN>/getWebhookInfo` for delivery errors, and confirm the Worker's `GITHUB_TOKEN` hasn't expired.
+- **Never commit real secrets** into any `.py` or `.js` file — always read them via `os.environ` (Python) or `env.*` (Worker), as already done throughout this codebase.
+- If a secret is ever accidentally committed, revoke and regenerate it immediately rather than just deleting it from a later commit.
+- For any pipeline issue — no reply, failed runs, dispatch errors — see **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)**, which covers debugging each hop of the pipeline plus credential rotation steps.
