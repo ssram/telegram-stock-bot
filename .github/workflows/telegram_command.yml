@@ -1,0 +1,38 @@
+name: Telegram Command Handler
+
+# Fires instantly when the Cloudflare Worker forwards a Telegram message
+# via GitHub's repository_dispatch API — no polling, no cron delay.
+on:
+  repository_dispatch:
+    types: [telegram_command]
+  workflow_dispatch:
+    inputs:
+      command_text:
+        description: "Command text to simulate, e.g. /liststocks"
+        required: true
+        default: "/help"
+
+jobs:
+  handle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - run: python handle_command.py
+        env:
+          # repository_dispatch payload fields, with workflow_dispatch
+          # fallbacks so this can also be triggered manually for testing
+          COMMAND_TEXT: ${{ github.event.client_payload.text || github.event.inputs.command_text }}
+          USER_ID: ${{ github.event.client_payload.userId }}
+          USERNAME: ${{ github.event.client_payload.username }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ALLOWED_USERS: ${{ secrets.TELEGRAM_ALLOWED_USERS }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_NAME: ${{ secrets.GOOGLE_SHEET_NAME }}

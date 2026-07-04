@@ -1,9 +1,15 @@
 """
-listener.py
-============
-Polls Telegram for new commands (run on a short cron, e.g. every 5 min),
-checks the sender against an allowlist, parses arguments, and dispatches
-to the right action.
+handle_command.py
+===================
+Handles ONE Telegram command per run. Triggered instantly by a
+repository_dispatch event, fired by a Cloudflare Worker the moment
+Telegram delivers a webhook message — no polling, no lag.
+
+The command text and sender info arrive via environment variables,
+set by the GitHub Actions workflow from the repository_dispatch payload:
+  COMMAND_TEXT  - the raw message text, e.g. "/addst RELIANCE 10 1350 1300 LongTerm"
+  USER_ID       - numeric Telegram user ID of the sender
+  USERNAME      - Telegram @username of the sender (for logging/messages)
 
 Commands (short form, long form still works too):
   /addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE   (or /addstock)
@@ -20,7 +26,7 @@ Commands (short form, long form still works too):
 
 import os
 
-from telegram_bot import get_updates, send_message
+from telegram_bot import send_message
 from sheets import (
     add_stock,
     update_stock,
@@ -32,21 +38,7 @@ from sheets import (
 )
 from weinstein_scanner import run_scan, run_watchlist_scan
 
-OFFSET_FILE = "last_update_id.txt"
-
 UPDATABLE_FIELDS = {"quantity", "price", "stoploss", "investType"}
-
-
-def load_offset():
-    if os.path.exists(OFFSET_FILE):
-        content = open(OFFSET_FILE).read().strip()
-        return int(content) if content else 0
-    return 0
-
-
-def save_offset(update_id):
-    with open(OFFSET_FILE, "w") as f:
-        f.write(str(update_id))
 
 
 def get_allowed_users():
@@ -55,7 +47,6 @@ def get_allowed_users():
 
 
 def handle_addstock(parts):
-    # /addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE
     if len(parts) < 2:
         return "Usage: /addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE (or /addstock)"
 
@@ -69,7 +60,6 @@ def handle_addstock(parts):
 
 
 def handle_updatestock(parts):
-    # /modst SYMBOL FIELD VALUE
     if len(parts) < 4:
         return f"Usage: /modst SYMBOL FIELD VALUE (or /updatestock)\nFields: {', '.join(UPDATABLE_FIELDS)}"
 
@@ -122,58 +112,55 @@ HELP_TEXT = (
 
 
 def main():
-    offset = load_offset()
-    updates = get_updates(offset=offset + 1 if offset else None)
+    text = os.environ.get("COMMAND_TEXT", "").strip()
+    user_id_raw = os.environ.get("USER_ID", "")
+    username = os.environ.get("USERNAME", "unknown")
+
+    if not text or not text.startswith("/"):
+        print(f"Ignoring non-command text: {text!r}")
+        return
+
+    try:
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        user_id = None
+
     allowed_users = get_allowed_users()
+    if allowed_users and user_id not in allowed_users:
+        send_message(f"⛔ Unauthorized user (@{username}, id={user_id}) tried: {text}")
+        return
 
-    for update in updates:
-        offset = update["update_id"]
-        message = update.get("message", {})
-        text = message.get("text", "").strip()
-        user = message.get("from", {})
-        user_id = user.get("id")
-        username = user.get("username", "unknown")
+    parts = text.split()
+    command = parts[0].lower()
 
-        if not text.startswith("/"):
-            continue
-
-        if allowed_users and user_id not in allowed_users:
-            send_message(f"⛔ Unauthorized user (@{username}, id={user_id}) tried: {text}")
-            continue
-
-        parts = text.split()
-        command = parts[0].lower()
-
-        try:
-            if command == "/addstock" or command == "/addst":
-                send_message(handle_addstock(parts))
-            elif command == "/updatestock" or command == "/modst":
-                send_message(handle_updatestock(parts))
-            elif command == "/removestock" or command == "/delst":
-                send_message(handle_removestock(parts))
-            elif command == "/liststocks" or command == "/listst":
-                send_message(list_stocks())
-            elif command == "/scan" or command == "/scnst":
-                send_message(f"🔍 Scan requested by @{username}, running...")
-                run_scan(notify=True)
-            elif command == "/addwatchlist" or command == "/addwl":
-                send_message(handle_addwatchlist(parts))
-            elif command == "/removewatchlist" or command == "/removewl" or command == "/delwl":
-                send_message(handle_removewatchlist(parts))
-            elif command == "/listwatchlist" or command == "/listwl":
-                send_message(list_watchlist())
-            elif command == "/scanwatchlist" or command == "/scanwl":
-                send_message(f"🔍 Watchlist scan requested by @{username}, running...")
-                run_watchlist_scan(notify=True)
-            elif command == "/help":
-                send_message(HELP_TEXT)
-            else:
-                send_message(f"Unknown command: {command}\n\n{HELP_TEXT}")
-        except Exception as e:
-            send_message(f"⚠️ Error handling `{text}`: {e}")
-
-    if offset:
-        save_offset(offset)
+    try:
+        if command == "/addstock" or command == "/addst":
+            send_message(handle_addstock(parts))
+        elif command == "/updatestock" or command == "/modst":
+            send_message(handle_updatestock(parts))
+        elif command == "/removestock" or command == "/delst":
+            send_message(handle_removestock(parts))
+        elif command == "/liststocks" or command == "/listst":
+            send_message(list_stocks())
+        elif command == "/scan" or command == "/scnst":
+            send_message(f"🔍 Scan requested by @{username}, running...")
+            run_scan(notify=True)
+        elif command == "/addwatchlist" or command == "/addwl":
+            send_message(handle_addwatchlist(parts))
+        elif command == "/removewatchlist" or command == "/removewl" or command == "/delwl":
+            send_message(handle_removewatchlist(parts))
+        elif command == "/listwatchlist" or command == "/listwl":
+            send_message(list_watchlist())
+        elif command == "/scanwatchlist" or command == "/scanwl":
+            send_message(f"🔍 Watchlist scan requested by @{username}, running...")
+            run_watchlist_scan(notify=True)
+        elif command == "/help":
+            send_message(HELP_TEXT)
+        else:
+            send_message(f"Unknown command: {command}\n\n{HELP_TEXT}")
+    except Exception as e:
+        send_message(f"⚠️ Error handling `{text}`: {e}")
+        raise  # re-raise so the Actions run shows as failed in the log
 
 
 if __name__ == "__main__":
