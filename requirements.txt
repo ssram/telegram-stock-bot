@@ -1,0 +1,5 @@
+pandas
+yfinance
+requests
+gspread
+google-auth
