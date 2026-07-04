@@ -5,20 +5,32 @@ Polls Telegram for new commands (run on a short cron, e.g. every 5 min),
 checks the sender against an allowlist, parses arguments, and dispatches
 to the right action.
 
-Commands:
-  /addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE
-  /updatestock SYMBOL FIELD VALUE       (FIELD: quantity|price|stoploss|investType)
-  /removestock SYMBOL
-  /liststocks
-  /scan
+Commands (short form, long form still works too):
+  /addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE   (or /addstock)
+  /modst SYMBOL FIELD VALUE                     (or /updatestock; FIELD: quantity|price|stoploss|investType)
+  /delst SYMBOL                                 (or /removestock)
+  /listst                                       (or /liststocks)
+  /scnst                                        (or /scan)
+  /addwl SYMBOL                                 (or /addwatchlist)
+  /delwl SYMBOL                                 (or /removewl, /removewatchlist)
+  /listwl                                       (or /listwatchlist)
+  /scanwl                                       (or /scanwatchlist)
   /help
 """
 
 import os
 
 from telegram_bot import get_updates, send_message
-from sheets import add_stock, update_stock, remove_stock, list_stocks
-from weinstein_scanner import run_scan
+from sheets import (
+    add_stock,
+    update_stock,
+    remove_stock,
+    list_stocks,
+    add_watchlist_stock,
+    remove_watchlist_stock,
+    list_watchlist,
+)
+from weinstein_scanner import run_scan, run_watchlist_scan
 
 OFFSET_FILE = "last_update_id.txt"
 
@@ -45,7 +57,7 @@ def get_allowed_users():
 def handle_addstock(parts):
     # /addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE
     if len(parts) < 2:
-        return "Usage: /addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE"
+        return "Usage: /addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE (or /addstock)"
 
     symbol = parts[1]
     quantity = float(parts[2]) if len(parts) > 2 else 0
@@ -57,9 +69,9 @@ def handle_addstock(parts):
 
 
 def handle_updatestock(parts):
-    # /updatestock SYMBOL FIELD VALUE
+    # /modst SYMBOL FIELD VALUE
     if len(parts) < 4:
-        return f"Usage: /updatestock SYMBOL FIELD VALUE\nFields: {', '.join(UPDATABLE_FIELDS)}"
+        return f"Usage: /modst SYMBOL FIELD VALUE (or /updatestock)\nFields: {', '.join(UPDATABLE_FIELDS)}"
 
     symbol, field, value = parts[1], parts[2], parts[3]
 
@@ -77,17 +89,34 @@ def handle_updatestock(parts):
 
 def handle_removestock(parts):
     if len(parts) < 2:
-        return "Usage: /removestock SYMBOL"
+        return "Usage: /delst SYMBOL (or /removestock)"
     return remove_stock(parts[1])
 
 
+def handle_addwatchlist(parts):
+    if len(parts) < 2:
+        return "Usage: /addwl SYMBOL (or /addwatchlist SYMBOL)"
+    return add_watchlist_stock(parts[1])
+
+
+def handle_removewatchlist(parts):
+    if len(parts) < 2:
+        return "Usage: /delwl SYMBOL (or /removewl, /removewatchlist)"
+    return remove_watchlist_stock(parts[1])
+
+
 HELP_TEXT = (
-    "*Commands*\n"
-    "/addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE - Add a stock\n"
-    "/updatestock SYMBOL FIELD VALUE - Update quantity, price, stoploss or investType\n"
-    "/removestock SYMBOL - Remove a stock\n"
-    "/liststocks - Show all tracked stocks\n"
-    "/scan - Run Weinstein Stage 2 scan now\n"
+    "*Holdings*\n"
+    "/addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE - Add a stock (or /addstock)\n"
+    "/modst SYMBOL FIELD VALUE - Update quantity, price, stoploss or investType (or /updatestock)\n"
+    "/delst SYMBOL - Remove a stock (or /removestock)\n"
+    "/listst - Show all tracked stocks (or /liststocks)\n"
+    "/scnst - Run Weinstein Stage 2 scan on holdings (or /scan)\n\n"
+    "*Watchlist*\n"
+    "/addwl SYMBOL - Add a symbol to the watchlist (or /addwatchlist)\n"
+    "/delwl SYMBOL - Remove a symbol from the watchlist (or /removewl, /removewatchlist)\n"
+    "/listwl - Show the watchlist (or /listwatchlist)\n"
+    "/scanwl - Run Weinstein Stage 2 scan on the watchlist (or /scanwatchlist)\n\n"
     "/help - Show this message"
 )
 
@@ -116,17 +145,26 @@ def main():
         command = parts[0].lower()
 
         try:
-            if command == "/addstock":
+            if command == "/addstock" or command == "/addst":
                 send_message(handle_addstock(parts))
-            elif command == "/updatestock":
+            elif command == "/updatestock" or command == "/modst":
                 send_message(handle_updatestock(parts))
-            elif command == "/removestock":
+            elif command == "/removestock" or command == "/delst":
                 send_message(handle_removestock(parts))
-            elif command == "/liststocks":
+            elif command == "/liststocks" or command == "/listst":
                 send_message(list_stocks())
-            elif command == "/scan":
+            elif command == "/scan" or command == "/scnst":
                 send_message(f"🔍 Scan requested by @{username}, running...")
                 run_scan(notify=True)
+            elif command == "/addwatchlist" or command == "/addwl":
+                send_message(handle_addwatchlist(parts))
+            elif command == "/removewatchlist" or command == "/removewl" or command == "/delwl":
+                send_message(handle_removewatchlist(parts))
+            elif command == "/listwatchlist" or command == "/listwl":
+                send_message(list_watchlist())
+            elif command == "/scanwatchlist" or command == "/scanwl":
+                send_message(f"🔍 Watchlist scan requested by @{username}, running...")
+                run_watchlist_scan(notify=True)
             elif command == "/help":
                 send_message(HELP_TEXT)
             else:

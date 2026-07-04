@@ -17,12 +17,18 @@ import os
 import pandas as pd
 import yfinance as yf
 
-from sheets import get_all_symbols, update_scan_result
+from sheets import (
+    get_all_symbols,
+    update_scan_result,
+    get_watchlist_symbols,
+    update_watchlist_result,
+)
 from telegram_bot import send_message, send_document
 
 MA_LENGTH = 30
 WITHIN_RANGE_PCT = 0
 OUTPUT_CSV = "weinstein_stage2.csv"
+WATCHLIST_OUTPUT_CSV = "weinstein_watchlist_scan.csv"
 
 
 def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT):
@@ -181,6 +187,67 @@ def run_scan(notify=True):
 
         send_message(summary)
         send_document(OUTPUT_CSV, caption="Full Stage 2 scan results")
+
+
+def run_watchlist_scan(notify=True):
+    """
+    Runs Weinstein Stage Analysis over every symbol on the Watchlist tab.
+    Writes CMP + Stage back for every symbol, and sends a Telegram summary
+    of which watchlist stocks are currently Stage 2 (potential entries).
+    """
+    symbols = get_watchlist_symbols()
+
+    if not symbols:
+        if notify:
+            send_message("⚠️ Watchlist is empty. Use /addwatchlist SYMBOL to add some.")
+        return
+
+    stage2_results = []
+
+    for symbol in symbols:
+        print(f"Scanning watchlist symbol {symbol}")
+        result = analyze_stock(symbol)
+
+        if result is None:
+            continue
+
+        update_watchlist_result(symbol, result["CMP"], result["Stage"])
+
+        if result["is_stage2"]:
+            result.pop("is_stage2")
+            stage2_results.append(result)
+
+    if not stage2_results:
+        if notify:
+            send_message("👀 Watchlist scan complete — no Stage 2 stocks right now.")
+        return
+
+    output = pd.DataFrame(stage2_results)
+    output.sort_values(
+        by=["Sector", "Weeks in Stage2", "% Above SMA"],
+        ascending=[True, False, False],
+        inplace=True,
+    )
+    output.to_csv(WATCHLIST_OUTPUT_CSV, index=False)
+
+    print(output)
+    print(f"\n✅ Saved: {WATCHLIST_OUTPUT_CSV}")
+
+    if notify:
+        summary_lines = [
+            f"{r['Symbol']} | {r['% Above SMA']}% above 30W SMA | "
+            f"{r['Weeks in Stage2']}w in Stage2"
+            for r in stage2_results[:15]
+        ]
+        summary = (
+            f"👀 *Watchlist scan complete* — {len(stage2_results)} Stage 2 stock(s) found\n\n"
+            + "\n".join(summary_lines)
+        )
+        if len(stage2_results) > 15:
+            summary += f"\n...and {len(stage2_results) - 15} more (see attached CSV)"
+
+        send_message(summary)
+        send_document(WATCHLIST_OUTPUT_CSV, caption="Full watchlist scan results")
 
 
 if __name__ == "__main__":
