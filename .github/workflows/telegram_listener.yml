@@ -3,7 +3,8 @@ name: Telegram Command Listener
 on:
   schedule:
     # Every 5 minutes, weekday daytime IST (8am-9pm IST = 2:30am-3:30pm UTC)
-    - cron: "*/5 2-15 * * 1-5"
+    # - cron: "*/5 2-15 * * 1-5"
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}   # allows manual trigger from the Actions tab
 
 permissions:
