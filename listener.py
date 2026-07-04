@@ -17,8 +17,16 @@ Commands:
 import os
 
 from telegram_bot import get_updates, send_message
-from sheets import add_stock, update_stock, remove_stock, list_stocks
-from weinstein_scanner import run_scan
+from sheets import (
+    add_stock,
+    update_stock,
+    remove_stock,
+    list_stocks,
+    add_watchlist_stock,
+    remove_watchlist_stock,
+    list_watchlist,
+)
+from weinstein_scanner import run_scan, run_watchlist_scan
 
 OFFSET_FILE = "last_update_id.txt"
 
@@ -81,13 +89,30 @@ def handle_removestock(parts):
     return remove_stock(parts[1])
 
 
+def handle_addwatchlist(parts):
+    if len(parts) < 2:
+        return "Usage: /addwatchlist SYMBOL"
+    return add_watchlist_stock(parts[1])
+
+
+def handle_removewatchlist(parts):
+    if len(parts) < 2:
+        return "Usage: /removewatchlist SYMBOL"
+    return remove_watchlist_stock(parts[1])
+
+
 HELP_TEXT = (
-    "*Commands*\n"
+    "*Holdings*\n"
     "/addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE - Add a stock\n"
     "/updatestock SYMBOL FIELD VALUE - Update quantity, price, stoploss or investType\n"
     "/removestock SYMBOL - Remove a stock\n"
     "/liststocks - Show all tracked stocks\n"
-    "/scan - Run Weinstein Stage 2 scan now\n"
+    "/scan - Run Weinstein Stage 2 scan on holdings\n\n"
+    "*Watchlist*\n"
+    "/addwatchlist SYMBOL - Add a symbol to the watchlist\n"
+    "/removewatchlist SYMBOL - Remove a symbol from the watchlist\n"
+    "/listwatchlist - Show the watchlist\n"
+    "/scanwatchlist - Run Weinstein Stage 2 scan on the watchlist\n\n"
     "/help - Show this message"
 )
 
@@ -127,6 +152,15 @@ def main():
             elif command == "/scan":
                 send_message(f"🔍 Scan requested by @{username}, running...")
                 run_scan(notify=True)
+            elif command == "/addwatchlist":
+                send_message(handle_addwatchlist(parts))
+            elif command == "/removewatchlist":
+                send_message(handle_removewatchlist(parts))
+            elif command == "/listwatchlist":
+                send_message(list_watchlist())
+            elif command == "/scanwatchlist":
+                send_message(f"🔍 Watchlist scan requested by @{username}, running...")
+                run_watchlist_scan(notify=True)
             elif command == "/help":
                 send_message(HELP_TEXT)
             else:
