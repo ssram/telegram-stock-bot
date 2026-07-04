@@ -148,11 +148,13 @@ message instead of failing silently (e.g. `/addst` alone replies with
 | `telegram_bot.py` | Sends messages/documents to Telegram |
 | `weinstein_scanner.py` | Core Weinstein Stage Analysis logic; `run_scan()` for holdings, `run_watchlist_scan()` for watchlist |
 | `handle_command.py` | Processes a single incoming Telegram command, enforces the allowlist, dispatches to the right handler |
-| `cloudflare-worker/worker.js` | Receives Telegram's webhook instantly, forwards the command to GitHub via `repository_dispatch` |
+| `cloudflare-worker/worker.js` | Verifies the webhook signature, forwards the command to GitHub via `repository_dispatch` |
+| `cloudflare-worker/wrangler.toml` | Worker deployment config — lets the Worker be redeployed on a new machine with `wrangler deploy` |
 | `.github/workflows/telegram_command.yml` | Runs `handle_command.py` the instant a command arrives |
 | `.github/workflows/scheduled_scan.yml` | Manual-only holdings scan trigger |
 | `requirements.txt` | Python dependencies |
 | `.gitignore` | Prevents accidental commits of local secrets/test files |
+| `TROUBLESHOOTING.md` | Layer-by-layer debugging guide and credential rotation steps |
 
 ---
 
@@ -179,7 +181,8 @@ Cloudflare dashboard:
 | Secret | Used for |
 |---|---|
 | `GITHUB_REPO` | e.g. `your-username/telegram-stock-bot` — tells the Worker which repo to dispatch to |
-| `GITHUB_TOKEN` | A GitHub Personal Access Token with `repo` scope, so the Worker can trigger the workflow |
+| `GITHUB_TOKEN` | A GitHub Personal Access Token with full `repo` scope, so the Worker can trigger the workflow |
+| `TELEGRAM_WEBHOOK_SECRET` | Random string verified against Telegram's `X-Telegram-Bot-Api-Secret-Token` header, to reject forged requests |
 
 ---
 
@@ -241,7 +244,29 @@ shared resources regardless of which branch or trigger ran the code.
 
 ---
 
-## 9. Known limitations
+## 9. Security
+
+- **Webhook authenticity**: the Worker verifies every request carries the
+  correct `TELEGRAM_WEBHOOK_SECRET` (via Telegram's
+  `X-Telegram-Bot-Api-Secret-Token` header) before forwarding anything to
+  GitHub. Without this, anyone who found the Worker's URL could forge a
+  request with a spoofed `user_id`, bypassing the Telegram-side allowlist
+  entirely.
+- **Token scope**: `GITHUB_TOKEN` uses full `repo` scope rather than the
+  narrower `public_repo`, since the latter was found insufficient for the
+  dispatches endpoint in practice (see `TROUBLESHOOTING.md`). This token
+  can do more than trigger dispatches — treat it as sensitive, set an
+  expiration, and rotate periodically.
+- **Command allowlist**: `TELEGRAM_ALLOWED_USERS` restricts who can issue
+  commands at all, checked in `handle_command.py` after the webhook
+  signature check passes.
+- **Credential rotation**: see `TROUBLESHOOTING.md` for step-by-step
+  rotation instructions for every secret in this system (GitHub token,
+  webhook secret, Telegram bot token, Google service account key).
+- **Debugging**: see `TROUBLESHOOTING.md` for a layer-by-layer diagnostic
+  guide covering the whole pipeline, plus real bugs hit during setup.
+
+## 10. Known limitations
 
 - **yfinance on shared runners**: GitHub Actions runners share IPs, which
   can occasionally get rate-limited by Yahoo Finance. If scans start
@@ -259,7 +284,7 @@ shared resources regardless of which branch or trigger ran the code.
 
 ---
 
-## 10. Future: order placement (planned)
+## 11. Future: order placement (planned)
 
 Dhan API integration is planned for placing real orders directly from
 Telegram commands. Because this moves from read-only/data-entry actions
