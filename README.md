@@ -7,7 +7,7 @@ A GitHub-hosted stock tracking tool that:
 - Responds within seconds via an event-driven pipeline (Telegram webhook → Cloudflare Worker → GitHub Actions)
 
 No server to maintain — GitHub Actions (free tier) + a free Cloudflare Worker.
-
+[WORKFLOW.md](WORKFLOW.md)
 For full architecture details, the complete command reference, and known
 limitations, see **[WORKFLOW.md](./WORKFLOW.md)**. For fixing things when
 they break, see **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)**. This file
@@ -101,18 +101,19 @@ In your Telegram group, send:
 
 ```
 /help
-/addst RELIANCE 10 1350 1300 LongTerm
-/listst
-/scnst
+/as RELIANCE 10 1350 1300 LongTerm
+/ls
+/ss
 ```
 
 You should get a reply within a few seconds — check the repo's **Actions** tab
 to see the corresponding run under **Telegram Command Handler**.
 
-`/addst` args are: `SYMBOL QUANTITY PRICE STOPLOSS INVESTTYPE`
+`/as` args are: `SYMBOL QUANTITY PRICE STOPLOSS INVESTTYPE`
 (fullname, sector, and industry are auto-filled from Yahoo Finance; cmp and stage are filled in after a scan.)
 
-See `WORKFLOW.md` for the full command list (holdings + watchlist, short and long forms).
+See `WORKFLOW.md` for the full command list (holdings + watchlist), or
+send `/helps` / `/helpw` in Telegram itself.
 
 ---
 
@@ -124,6 +125,7 @@ See `WORKFLOW.md` for the full command list (holdings + watchlist, short and lon
 | `telegram_bot.py` | Sends messages/files to Telegram |
 | `weinstein_scanner.py` | Runs the Weinstein Stage Analysis over holdings or watchlist |
 | `handle_command.py` | Processes one incoming Telegram command and dispatches to the right action |
+| `formatting.py` | Builds Telegram-friendly monospaced tables for list/scan output |
 | `cloudflare-worker/worker.js` | Receives Telegram's webhook, forwards it to GitHub |
 | `.github/workflows/telegram_command.yml` | Runs instantly when a command arrives |
 | `.github/workflows/scheduled_scan.yml` | Manual-only scan trigger (no automatic schedule) |

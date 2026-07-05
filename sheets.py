@@ -133,7 +133,7 @@ def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown"):
     symbol = symbol.strip().upper()
 
     if _find_row(sheet, symbol):
-        return f"⚠️ {symbol} already exists. Use /updatestock to change it."
+        return f"⚠️ {symbol} already exists. Use /us to change it."
 
     info = get_company_info(symbol)
 
@@ -162,7 +162,7 @@ def update_stock(symbol, **fields):
     row_num = _find_row(sheet, symbol)
 
     if not row_num:
-        return f"⚠️ {symbol.upper()} not found. Use /addstock first."
+        return f"⚠️ {symbol.upper()} not found. Use /as first."
 
     updated = []
     for key, value in fields.items():
@@ -189,21 +189,19 @@ def remove_stock(symbol):
     return f"🗑️ Removed {symbol.upper()}."
 
 
-def list_stocks():
+def get_all_holdings_records():
+    """Returns all holdings records, sorted ascending by stockName."""
     sheet = get_sheet()
     records = sheet.get_all_records()
+    records = [r for r in records if r.get("stockName")]
+    records.sort(key=lambda r: str(r.get("stockName", "")).upper())
+    return records
 
-    if not records:
-        return "Sheet is empty. Use /addstock SYMBOL QTY PRICE STOPLOSS INVESTTYPE to add one."
 
-    lines = []
-    for r in records:
-        lines.append(
-            f"{r['stockName']} | Qty:{r['quantity']} Buy:{r['price']} "
-            f"CMP:{r.get('cmp', '-')} SL:{r['stoploss']} "
-            f"Stage:{r.get('stage', '-')} ({r['investType']})"
-        )
-    return "📋 Current holdings:\n" + "\n".join(lines)
+def get_holdings_by_stage(stage):
+    """Returns holdings records matching the given stage exactly (e.g. 'Stage 2'),
+    sorted ascending by stockName."""
+    return [r for r in get_all_holdings_records() if r.get("stage") == stage]
 
 
 def get_all_symbols():
@@ -259,19 +257,19 @@ def remove_watchlist_stock(symbol):
     return f"🗑️ Removed {symbol.upper()} from watchlist."
 
 
-def list_watchlist():
+def get_all_watchlist_records():
+    """Returns all watchlist records, sorted ascending by stockName."""
     sheet = get_watchlist_sheet()
     records = sheet.get_all_records()
+    records = [r for r in records if r.get("stockName")]
+    records.sort(key=lambda r: str(r.get("stockName", "")).upper())
+    return records
 
-    if not records:
-        return "Watchlist is empty. Use /addwatchlist SYMBOL to add one."
 
-    lines = [
-        f"{r['stockName']} | CMP:{r.get('cmp', '-')} Stage:{r.get('stage', '-')} "
-        f"({r.get('sector', 'Unknown')})"
-        for r in records
-    ]
-    return "👀 Watchlist:\n" + "\n".join(lines)
+def get_watchlist_by_stage(stage):
+    """Returns watchlist records matching the given stage exactly (e.g. 'Stage 1'),
+    sorted ascending by stockName."""
+    return [r for r in get_all_watchlist_records() if r.get("stage") == stage]
 
 
 def get_watchlist_symbols():

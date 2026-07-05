@@ -196,7 +196,7 @@ Only needed if the bot token itself is suspected compromised:
 3. Update the GitHub secret `GOOGLE_SERVICE_ACCOUNT_JSON` with the full
    contents of the new file
 4. Delete the old key from the same **Keys** tab once the new one is
-   confirmed working (test with a read command like `/liststocks` first)
+   confirmed working (test with a read command like `/ls` first)
 
 ---
 
