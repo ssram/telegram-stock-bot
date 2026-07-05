@@ -77,27 +77,27 @@ One spreadsheet, two tabs.
 
 | Column | Filled by | Notes |
 |---|---|---|
-| `stockName` | User (`/addst`) | NSE symbol, unique key |
+| `stockName` | User (`/as`) | NSE symbol, unique key |
 | `fullname` | Auto (yfinance) | Company name |
 | `sector` | Auto (yfinance) | |
 | `industry` | Auto (yfinance) | |
 | `quantity` | User | |
 | `price` | User | Buy price |
-| `cmp` | Auto (`/scnst`) | Current market price, updated on each scan |
+| `cmp` | Auto (`/ss`) | Current market price, updated on each scan |
 | `stoploss` | User | |
-| `stage` | Auto (`/scnst`) | Weinstein stage, updated on each scan |
+| `stage` | Auto (`/ss`) | Weinstein stage, updated on each scan |
 | `investType` | User | e.g. LongTerm, Swing |
 
 ### Watchlist tab (auto-created on first use)
 
 | Column | Filled by | Notes |
 |---|---|---|
-| `stockName` | User (`/addwl`) | |
+| `stockName` | User (`/aw`) | |
 | `fullname` | Auto (yfinance) | |
 | `sector` | Auto (yfinance) | |
 | `industry` | Auto (yfinance) | |
-| `cmp` | Auto (`/scanwl`) | |
-| `stage` | Auto (`/scanwl`) | |
+| `cmp` | Auto (`/sw`) | |
+| `stage` | Auto (`/sw`) | |
 
 No `quantity`/`price`/`stoploss`/`investType` on the Watchlist tab —
 these aren't positions, just symbols being tracked.
@@ -106,37 +106,54 @@ these aren't positions, just symbols being tracked.
 
 ## 4. Telegram commands
 
-Every command has a short form and a long form; both work identically.
-Access is restricted to user IDs listed in `TELEGRAM_ALLOWED_USERS`.
+No long-form aliases anymore — each command has exactly one name. All
+list/scan output renders as a monospaced table (Telegram code block),
+sorted ascending by symbol. Access is restricted to user IDs listed in
+`TELEGRAM_ALLOWED_USERS`.
 
 ### Holdings
 
-| Short | Long | Usage |
+| Command | Usage | Purpose |
 |---|---|---|
-| `/addst` | `/addstock` | `/addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE` |
-| `/modst` | `/updatestock` | `/modst SYMBOL FIELD VALUE` — FIELD: `quantity`, `price`, `stoploss`, `investType` |
-| `/delst` | `/removestock` | `/delst SYMBOL` |
-| `/listst` | `/liststocks` | `/listst` — no arguments |
-| `/scnst` | `/scan` | `/scnst` — runs Weinstein analysis on all holdings, writes back `cmp`/`stage`, posts summary + CSV |
+| `/as` | `/as SYMBOL QTY PRICE STOPLOSS INVESTTYPE` | Add a stock |
+| `/ds` | `/ds SYMBOL` | Delete a stock |
+| `/us` | `/us SYMBOL FIELD VALUE` | Update any field (`quantity`, `price`, `stoploss`, `investType`) |
+| `/usqty` | `/usqty SYMBOL VALUE` | Update quantity only |
+| `/usbuy` | `/usbuy SYMBOL VALUE` | Update buy price only |
+| `/ussl` | `/ussl SYMBOL VALUE` | Update stoploss only |
+| `/usit` | `/usit SYMBOL VALUE` | Update investment type only |
+| `/ss` | `/ss` | Scan holdings, write back `cmp`/`stage`, post table + CSV of Stage 2 hits |
+| `/ls` | `/ls` | List all holdings, ascending, as a table |
+| `/lsstg` | `/lsstg` | List holdings grouped by stage (one table per stage) |
+| `/lsstg2` | `/lsstg2` | List only Stage 2 holdings |
+| `/lsstg3` | `/lsstg3` | List only Stage 3 holdings |
+| `/lsst4` | `/lsst4` | List only Stage 4 holdings *(note: no `/lsstg1` exists by design — holdings stage-filtering starts at Stage 2)* |
 
 ### Watchlist
 
-| Short | Long | Usage |
+| Command | Usage | Purpose |
 |---|---|---|
-| `/addwl` | `/addwatchlist` | `/addwl SYMBOL` |
-| `/delwl` | `/removewl`, `/removewatchlist` | `/delwl SYMBOL` |
-| `/listwl` | `/listwatchlist` | `/listwl` — no arguments |
-| `/scanwl` | `/scanwatchlist` | `/scanwl` — runs Weinstein analysis on watchlist, writes back `cmp`/`stage`, posts summary + CSV of Stage 2 hits |
+| `/aw` | `/aw SYMBOL` | Add a symbol to the watchlist |
+| `/dw` | `/dw SYMBOL` | Delete a symbol from the watchlist |
+| `/sw` | `/sw` | Scan watchlist, write back `cmp`/`stage`, post table + CSV of Stage 2 hits |
+| `/lw` | `/lw` | List watchlist, ascending, as a table |
+| `/lwstg` | `/lwstg` | List watchlist grouped by stage (one table per stage) |
+| `/lwstg1` | `/lwstg1` | List only Stage 1 watchlist stocks |
+| `/lwstg2` | `/lwstg2` | List only Stage 2 watchlist stocks |
+| `/lwstg3` | `/lwstg3` | List only Stage 3 watchlist stocks |
+| `/lwstg4` | `/lwstg4` | List only Stage 4 watchlist stocks |
 
-### General
+### Help
 
 | Command | Purpose |
 |---|---|
-| `/help` | Shows the full command list with usage |
+| `/help` | Compact overview of all commands, with command names highlighted |
+| `/helps` | Holdings commands only, each with full usage |
+| `/helpw` | Watchlist commands only, each with full usage |
 
 Sending any command with missing required arguments returns a usage
-message instead of failing silently (e.g. `/addst` alone replies with
-`Usage: /addst SYMBOL QTY PRICE STOPLOSS INVESTTYPE (or /addstock)`).
+message instead of failing silently (e.g. `/as` alone replies with
+`` Usage: `/as SYMBOL QTY PRICE STOPLOSS INVESTTYPE` ``).
 
 ---
 
@@ -148,6 +165,7 @@ message instead of failing silently (e.g. `/addst` alone replies with
 | `telegram_bot.py` | Sends messages/documents to Telegram |
 | `weinstein_scanner.py` | Core Weinstein Stage Analysis logic; `run_scan()` for holdings, `run_watchlist_scan()` for watchlist |
 | `handle_command.py` | Processes a single incoming Telegram command, enforces the allowlist, dispatches to the right handler |
+| `formatting.py` | Builds Telegram-friendly monospaced tables for list/scan output |
 | `cloudflare-worker/worker.js` | Verifies the webhook signature, forwards the command to GitHub via `repository_dispatch` |
 | `cloudflare-worker/wrangler.toml` | Worker deployment config — lets the Worker be redeployed on a new machine with `wrangler deploy` |
 | `.github/workflows/telegram_command.yml` | Runs `handle_command.py` the instant a command arrives |
@@ -228,7 +246,7 @@ git checkout -b test-branch-name
 ```
 Then in the Actions tab: **Telegram Command Handler** → **Run workflow**
 → pick `test-branch-name` from the branch dropdown → enter a command in
-the `command_text` input (e.g. `/liststocks`) → **Run workflow**.
+the `command_text` input (e.g. `/ls`) → **Run workflow**.
 
 Note: this bypasses the allowlist check (no real `USER_ID` is available
 from a manual run), so it always executes — fine for testing logic, but

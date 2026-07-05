@@ -24,6 +24,7 @@ from sheets import (
     update_watchlist_result,
 )
 from telegram_bot import send_message, send_document
+from formatting import build_table
 
 MA_LENGTH = 30
 WITHIN_RANGE_PCT = 0
@@ -137,7 +138,7 @@ def run_scan(notify=True):
 
     if not symbols:
         if notify:
-            send_message("⚠️ No stocks in the sheet yet. Use /addstock to add some.")
+            send_message("⚠️ No stocks in the sheet yet. Use /as to add some.")
         return
 
     stage2_results = []
@@ -173,17 +174,20 @@ def run_scan(notify=True):
     print(f"\n✅ Saved: {OUTPUT_CSV}")
 
     if notify:
-        summary_lines = [
-            f"{r['Symbol']} | {r['% Above SMA']}% above 30W SMA | "
-            f"{r['Weeks in Stage2']}w in Stage2"
-            for r in stage2_results[:15]
+        # Ascending by symbol for the on-screen table (the CSV keeps the
+        # sector/strength sort above, since that's more useful in a file).
+        table_rows = sorted(stage2_results, key=lambda r: r["Symbol"])
+        headers = ["SYMBOL", "% ABOVE SMA", "WEEKS"]
+        rows = [
+            [r["Symbol"], r["% Above SMA"], r["Weeks in Stage2"]]
+            for r in table_rows[:30]
         ]
         summary = (
-            f"📈 *Stage 2 scan complete* — {len(stage2_results)} stock(s) found\n\n"
-            + "\n".join(summary_lines)
+            f"📈 *Stage 2 scan complete* — {len(stage2_results)} stock(s) found\n"
+            + build_table(headers, rows)
         )
-        if len(stage2_results) > 15:
-            summary += f"\n...and {len(stage2_results) - 15} more (see attached CSV)"
+        if len(stage2_results) > 30:
+            summary += f"\n_...and {len(stage2_results) - 30} more, see attached CSV_"
 
         send_message(summary)
         send_document(OUTPUT_CSV, caption="Full Stage 2 scan results")
@@ -199,7 +203,7 @@ def run_watchlist_scan(notify=True):
 
     if not symbols:
         if notify:
-            send_message("⚠️ Watchlist is empty. Use /addwatchlist SYMBOL to add some.")
+            send_message("⚠️ Watchlist is empty. Use /aw SYMBOL to add some.")
         return
 
     stage2_results = []
@@ -234,17 +238,18 @@ def run_watchlist_scan(notify=True):
     print(f"\n✅ Saved: {WATCHLIST_OUTPUT_CSV}")
 
     if notify:
-        summary_lines = [
-            f"{r['Symbol']} | {r['% Above SMA']}% above 30W SMA | "
-            f"{r['Weeks in Stage2']}w in Stage2"
-            for r in stage2_results[:15]
+        table_rows = sorted(stage2_results, key=lambda r: r["Symbol"])
+        headers = ["SYMBOL", "% ABOVE SMA", "WEEKS"]
+        rows = [
+            [r["Symbol"], r["% Above SMA"], r["Weeks in Stage2"]]
+            for r in table_rows[:30]
         ]
         summary = (
-            f"👀 *Watchlist scan complete* — {len(stage2_results)} Stage 2 stock(s) found\n\n"
-            + "\n".join(summary_lines)
+            f"👀 *Watchlist scan complete* — {len(stage2_results)} Stage 2 stock(s) found\n"
+            + build_table(headers, rows)
         )
-        if len(stage2_results) > 15:
-            summary += f"\n...and {len(stage2_results) - 15} more (see attached CSV)"
+        if len(stage2_results) > 30:
+            summary += f"\n_...and {len(stage2_results) - 30} more, see attached CSV_"
 
         send_message(summary)
         send_document(WATCHLIST_OUTPUT_CSV, caption="Full watchlist scan results")
