@@ -18,11 +18,16 @@ def _pad(value, width):
     return text.ljust(width)
 
 
-def build_table(headers, rows, col_widths=None):
+def build_table(headers, rows, col_widths=None, max_col_width=16):
     """
     headers: list of column header strings
     rows: list of lists, same column count as headers
     col_widths: optional list of ints; auto-computed from content if omitted
+    max_col_width: cap applied when auto-computing widths (ignored if
+        col_widths is given explicitly). Use a higher value or None for
+        static reference tables (e.g. help text) where truncation looks
+        bad; the default of 16 suits dynamic stock-data tables where a
+        long value is rare and truncation is an acceptable tradeoff.
 
     Returns a Telegram code-block string (wrapped in ``` ```), safe to
     pass straight to send_message().
@@ -34,7 +39,9 @@ def build_table(headers, rows, col_widths=None):
         col_widths = []
         for i, header in enumerate(headers):
             longest = max([len(str(header))] + [len(str(r[i])) for r in rows])
-            col_widths.append(min(longest, 16))  # cap width so long names don't blow up the table
+            if max_col_width is not None:
+                longest = min(longest, max_col_width)
+            col_widths.append(longest)
 
     header_line = "  ".join(_pad(h, w) for h, w in zip(headers, col_widths))
     separator = "  ".join("-" * w for w in col_widths)
@@ -63,12 +70,12 @@ def build_table(headers, rows, col_widths=None):
 def build_holdings_table(records, title="Holdings"):
     """
     records: list of dicts with keys stockName, quantity, price, cmp,
-    stoploss, stage, investType — already sorted by caller.
+    stoploss, stage, Type — already sorted by caller.
     """
     if not records:
         return f"*{title}*\n_No stocks found._"
 
-    headers = ["SYMBOL", "QTY", "BUY", "CMP", "SL", "STAGE", "TYPE"]
+    headers = ["SYMBOL", "QTY", "BUY", "CMP", "SL", "TARGET", "STAGE", "TYPE"]
     rows = []
     for r in records:
         stage = str(r.get("stage", "") or "-").replace("Stage ", "S")
@@ -78,8 +85,9 @@ def build_holdings_table(records, title="Holdings"):
             r.get("price", ""),
             r.get("cmp", "") or "-",
             r.get("stoploss", ""),
+            r.get("target", "") or "-",
             stage,
-            r.get("investType", ""),
+            r.get("Type", ""),
         ])
 
     return f"*{title}*\n" + build_table(headers, rows)

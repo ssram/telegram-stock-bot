@@ -83,10 +83,11 @@ One spreadsheet, two tabs.
 | `industry` | Auto (yfinance) | |
 | `quantity` | User | |
 | `price` | User | Buy price |
-| `cmp` | Auto (`/ss`) | Current market price, updated on each scan |
+| `cmp` | Auto (`/ss`) | Live/current market price (via `fast_info`), updated on each scan — separate from the weekly data used for stage classification |
 | `stoploss` | User | |
 | `stage` | Auto (`/ss`) | Weinstein stage, updated on each scan |
-| `investType` | User | e.g. LongTerm, Swing |
+| `Type` | User | e.g. LongTerm, Swing |
+| `target` | User (`/ustgt`) | Target price, optional — used by `/lstg` |
 
 ### Watchlist tab (auto-created on first use)
 
@@ -99,35 +100,55 @@ One spreadsheet, two tabs.
 | `cmp` | Auto (`/sw`) | |
 | `stage` | Auto (`/sw`) | |
 
-No `quantity`/`price`/`stoploss`/`investType` on the Watchlist tab —
+No `quantity`/`price`/`stoploss`/`Type` on the Watchlist tab —
 these aren't positions, just symbols being tracked.
 
 ---
 
 ## 4. Telegram commands
 
-No long-form aliases anymore — each command has exactly one name. All
-list/scan output renders as a monospaced table (Telegram code block),
-sorted ascending by symbol. Access is restricted to user IDs listed in
-`TELEGRAM_ALLOWED_USERS`.
+Each command has exactly one name (no aliases). All list/scan output
+renders as a monospaced table (Telegram code block), sorted ascending by
+symbol; stage-filtered lists show the matching count in the title (e.g.
+"Holdings — Stage 2 (4)"). Access is restricted to user IDs listed in
+`TELEGRAM_ALLOWED_USERS`. Scans (`/ss`, `/sw`) always post a summary
+table; add `csv` as an argument (e.g. `/ss csv`) to also generate and
+attach a downloadable CSV file — omitted by default to avoid writing a
+file on every single scan. `/ls` and `/lw` also accept an optional `ss`
+or `sw` argument respectively to refresh `cmp`/`stage` first, silently,
+before listing — otherwise they just show whatever's currently stored,
+which can be stale until the next scan. `cmp` itself is a live/current
+quote (via `yfinance`'s `fast_info`), kept separate from the weekly
+candle data used for stage classification — the two can legitimately
+differ, especially mid-week before the current week's candle finalizes.
 
 ### Holdings
 
 | Command | Usage | Purpose |
 |---|---|---|
-| `/as` | `/as SYMBOL QTY PRICE STOPLOSS INVESTTYPE` | Add a stock |
+| `/as` | `/as SYMBOL QTY PRICE STOPLOSS TYPE` | Add a stock |
 | `/ds` | `/ds SYMBOL` | Delete a stock |
-| `/us` | `/us SYMBOL FIELD VALUE` | Update any field (`quantity`, `price`, `stoploss`, `investType`) |
+| `/us` | `/us SYMBOL FIELD VALUE` | Update any field (`quantity`, `price`, `stoploss`, `Type`, `target`) |
 | `/usqty` | `/usqty SYMBOL VALUE` | Update quantity only |
 | `/usbuy` | `/usbuy SYMBOL VALUE` | Update buy price only |
 | `/ussl` | `/ussl SYMBOL VALUE` | Update stoploss only |
-| `/usit` | `/usit SYMBOL VALUE` | Update investment type only |
-| `/ss` | `/ss` | Scan holdings, write back `cmp`/`stage`, post table + CSV of Stage 2 hits |
-| `/ls` | `/ls` | List all holdings, ascending, as a table |
-| `/lsstg` | `/lsstg` | List holdings grouped by stage (one table per stage) |
-| `/lsstg2` | `/lsstg2` | List only Stage 2 holdings |
-| `/lsstg3` | `/lsstg3` | List only Stage 3 holdings |
-| `/lsst4` | `/lsst4` | List only Stage 4 holdings *(note: no `/lsstg1` exists by design — holdings stage-filtering starts at Stage 2)* |
+| `/usit` | `/usit SYMBOL VALUE` | Update Type only |
+| `/ustgt` | `/ustgt SYMBOL VALUE` | Update target price only |
+| `/qssl` | `/qssl SYMBOL` | Query the current stoploss for a stock |
+| `/lssl` | `/lssl [ss]` | List holdings where `cmp <= stoploss`. `ss` refreshes cmp/stage first |
+| `/lstg` | `/lstg [ss]` | List holdings where `cmp > target` (skips stocks with no target set). `ss` refreshes cmp/stage first |
+| `/ss` | `/ss [csv]` | Scan holdings, write back `cmp`/`stage` for every symbol, post summary table (CSV optional) |
+| `/ls` | `/ls [ss] [csv]` | List all holdings, ascending, as a table. `ss` refreshes cmp/stage first (silent scan); `csv` also attaches a full CSV |
+| `/lsstg` | `/lsstg` | List holdings grouped by stage (one table per stage, each with a count) |
+| `/lsstg2` | `/lsstg2` | List only Stage 2 holdings, with count |
+| `/lsstg3` | `/lsstg3` | List only Stage 3 holdings, with count |
+| `/lsstg4` | `/lsstg4` | List only Stage 4 holdings, with count *(note: no `/lsstg1` exists by design — holdings stage-filtering starts at Stage 2)* |
+
+### Nifty signal
+
+| Command | Usage | Purpose |
+|---|---|---|
+| `/nifty` | `/nifty` | Mechanical Nifty trend signal: 5-min EMA9/EMA21 crossover with price-action confirmation (candle must close beyond both EMAs). Suggests ATM strike + direction (CE/PE), with SL/target in **Nifty index points** — not option premium, since no live option-chain data source is integrated yet. See `nifty_signal.py` for the exact rule and constants (`SL_POINTS`, `TARGET_POINTS`, `STRIKE_INTERVAL`). This is a mechanical technical output, not financial advice. |
 
 ### Watchlist
 
@@ -135,12 +156,12 @@ sorted ascending by symbol. Access is restricted to user IDs listed in
 |---|---|---|
 | `/aw` | `/aw SYMBOL` | Add a symbol to the watchlist |
 | `/dw` | `/dw SYMBOL` | Delete a symbol from the watchlist |
-| `/sw` | `/sw` | Scan watchlist, write back `cmp`/`stage`, post table + CSV of Stage 2 hits |
-| `/lw` | `/lw` | List watchlist, ascending, as a table |
-| `/lwstg` | `/lwstg` | List watchlist grouped by stage (one table per stage) |
-| `/lwstg1` | `/lwstg1` | List only Stage 1 watchlist stocks |
-| `/lwstg2` | `/lwstg2` | List only Stage 2 watchlist stocks |
-| `/lwstg3` | `/lwstg3` | List only Stage 3 watchlist stocks |
+| `/sw` | `/sw [csv]` | Scan watchlist, write back `cmp`/`stage` for every symbol, post summary table (CSV optional) |
+| `/lw` | `/lw [sw] [csv]` | List watchlist, ascending, as a table. `sw` refreshes cmp/stage first (silent scan); `csv` also attaches a full CSV |
+| `/lwstg` | `/lwstg` | List watchlist grouped by stage (one table per stage, each with a count) |
+| `/lwstg1` | `/lwstg1` | List only Stage 1 watchlist stocks, with count |
+| `/lwstg2` | `/lwstg2` | List only Stage 2 watchlist stocks, with count |
+| `/lwstg3` | `/lwstg3` | List only Stage 3 watchlist stocks, with count |
 | `/lwstg4` | `/lwstg4` | List only Stage 4 watchlist stocks |
 
 ### Help
@@ -166,6 +187,7 @@ message instead of failing silently (e.g. `/as` alone replies with
 | `weinstein_scanner.py` | Core Weinstein Stage Analysis logic; `run_scan()` for holdings, `run_watchlist_scan()` for watchlist |
 | `handle_command.py` | Processes a single incoming Telegram command, enforces the allowlist, dispatches to the right handler |
 | `formatting.py` | Builds Telegram-friendly monospaced tables for list/scan output |
+| `nifty_signal.py` | Mechanical Nifty EMA9/EMA21 trend signal and ATM strike suggestion (see below) |
 | `cloudflare-worker/worker.js` | Verifies the webhook signature, forwards the command to GitHub via `repository_dispatch` |
 | `cloudflare-worker/wrangler.toml` | Worker deployment config — lets the Worker be redeployed on a new machine with `wrangler deploy` |
 | `.github/workflows/telegram_command.yml` | Runs `handle_command.py` the instant a command arrives |
@@ -203,6 +225,21 @@ Cloudflare dashboard:
 | `TELEGRAM_WEBHOOK_SECRET` | Random string verified against Telegram's `X-Telegram-Bot-Api-Secret-Token` header, to reject forged requests |
 
 ---
+
+## 6.5. Migrating an existing Sheet (adding the `target` column)
+
+If your Holdings tab was created before `target` was added, add it
+manually: open the Sheet, go to the first empty column after `Type`
+(column K if you haven't added other columns), and type `target` as the
+header — exact spelling and case matter, since it's compared against
+`sheets.py`'s `COLUMNS` list. Existing rows can be left blank in that
+column; `/lssl`/`/lstg` simply skip any stock with no target set, and
+`/ustgt` can be used to fill it in per stock afterward.
+
+Since the header-mismatch check is non-destructive (see Security below),
+forgetting this step won't corrupt anything — it'll just print a warning
+in the Actions log and `target`-related commands will have nothing to
+read until the column exists with the right name.
 
 ## 7. Setting up the event-driven pipeline (one-time)
 
@@ -264,6 +301,12 @@ shared resources regardless of which branch or trigger ran the code.
 
 ## 9. Security
 
+- **Sheet header safety**: `sheets.py` never clears/wipes the Sheet if
+  its header row doesn't match the expected columns (e.g. after
+  renaming a column). It only auto-creates the header on a genuinely
+  empty sheet; any mismatch is logged as a warning in the Actions log
+  instead of triggering a destructive `clear()`. This was previously a
+  real risk — a header rename alone used to wipe all data.
 - **Webhook authenticity**: the Worker verifies every request carries the
   correct `TELEGRAM_WEBHOOK_SECRET` (via Telegram's
   `X-Telegram-Bot-Api-Secret-Token` header) before forwarding anything to
@@ -286,6 +329,16 @@ shared resources regardless of which branch or trigger ran the code.
 
 ## 10. Known limitations
 
+- **`/nifty` has no live option-premium data**: SL/target are in Nifty
+  index points only. yfinance also doesn't reliably support NSE options
+  contracts directly, so the actual option premium, its own SL/target,
+  and Greeks aren't available yet — this is expected to improve once
+  the planned Dhan API integration (or another options data feed) is
+  wired in.
+- **yfinance 5-minute data is limited to the last ~60 days** and is
+  intraday-only — running `/nifty` outside market hours will show the
+  last available candle (check the "as of" timestamp in the reply)
+  rather than a truly live price.
 - **yfinance on shared runners**: GitHub Actions runners share IPs, which
   can occasionally get rate-limited by Yahoo Finance. If scans start
   failing intermittently, adding a short delay between symbol lookups in

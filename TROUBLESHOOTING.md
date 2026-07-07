@@ -85,6 +85,18 @@ Repo → **Actions** tab → click the specific run → expand each step's logs.
 These are documented in detail because they're easy to hit again after a
 credential rotation or a fresh setup on a new machine.
 
+**0. Telegram retries the webhook if the Worker responds slowly, causing
+duplicate/delayed replies.**
+The original Worker code `await`ed the GitHub dispatch call before
+responding to Telegram. If that call was ever slow, Telegram could time
+out waiting for a response and redeliver the same update — firing a
+second `repository_dispatch` for the same command, which can look like a
+stale or duplicate reply arriving later, out of order with whatever you
+sent next. Fix: respond to Telegram immediately using
+`ctx.waitUntil(...)` to let the GitHub call keep running in the
+background after the response is already sent, plus a best-effort
+in-memory dedupe on Telegram's `update_id` as a second layer.
+
 **1. `public_repo` token scope returns 404 on `/dispatches`.**
 Despite GitHub's own docs saying `public_repo` scope is sufficient for
 dispatching to public repos, it did not work in practice here. Fix: use
