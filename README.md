@@ -7,7 +7,7 @@ A GitHub-hosted stock tracking tool that:
 - Responds within seconds via an event-driven pipeline (Telegram webhook → Cloudflare Worker → GitHub Actions)
 
 No server to maintain — GitHub Actions (free tier) + a free Cloudflare Worker.
-[WORKFLOW.md](WORKFLOW.md)
+
 For full architecture details, the complete command reference, and known
 limitations, see **[WORKFLOW.md](./WORKFLOW.md)**. For fixing things when
 they break, see **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)**. This file

@@ -7,7 +7,7 @@ Sheet columns (in this exact order — row 1 must be a header row with these
 names):
 
     stockName, fullname, sector, industry, quantity, price, cmp,
-    stoploss, stage, investType
+    stoploss, stage, Type, target
 
 - stockName : NSE symbol, e.g. RELIANCE (this is the unique key for lookups)
 - fullname  : Company full name (auto-filled from yfinance)
@@ -15,10 +15,11 @@ names):
 - industry  : Industry (auto-filled from yfinance)
 - quantity  : Quantity held (user-provided)
 - price     : Buy price (user-provided)
-- cmp       : Current market price (auto-updated on each /scan)
+- cmp       : Current market price, live quote (auto-updated on each /ss)
 - stoploss  : Stoploss level (user-provided)
-- stage     : Weinstein stage, e.g. "Stage 2" (auto-updated on each /scan)
-- investType: e.g. "LongTerm" / "Swing" / "Positional" (user-provided)
+- stage     : Weinstein stage, e.g. "Stage 2" (auto-updated on each /ss)
+- Type      : e.g. "LongTerm" / "Swing" / "Positional" (user-provided)
+- target    : Target price (user-provided, optional — set via /ustgt)
 """
 
 import os
@@ -33,7 +34,7 @@ SCOPES = [
 
 COLUMNS = [
     "stockName", "fullname", "sector", "industry", "quantity",
-    "price", "cmp", "stoploss", "stage", "investType",
+    "price", "cmp", "stoploss", "stage", "Type", "target",
 ]
 
 WATCHLIST_TAB_NAME = "Watchlist"
@@ -69,9 +70,20 @@ def get_sheet():
     sheet = spreadsheet.sheet1
 
     header = sheet.row_values(1)
-    if header != COLUMNS:
-        sheet.clear()
+    if not header:
+        # Truly empty sheet — safe to create the header row.
         sheet.append_row(COLUMNS)
+    elif header != COLUMNS:
+        # Header exists but doesn't match — could be a legitimate rename
+        # (e.g. investType -> Type) or a manual edit. NEVER clear/wipe the
+        # sheet here; that would destroy real data. Just warn so it's
+        # visible in the Actions log, and let the mismatch be reconciled
+        # manually if it's actually a problem.
+        print(
+            f"⚠️ WARNING: Sheet header does not match expected columns.\n"
+            f"  Expected: {COLUMNS}\n  Found:    {header}\n"
+            f"  Proceeding without modifying the sheet."
+        )
 
     _sheet_cache = sheet
     return sheet
@@ -94,9 +106,14 @@ def get_watchlist_sheet():
         sheet.append_row(WATCHLIST_COLUMNS)
 
     header = sheet.row_values(1)
-    if header != WATCHLIST_COLUMNS:
-        sheet.clear()
+    if not header:
         sheet.append_row(WATCHLIST_COLUMNS)
+    elif header != WATCHLIST_COLUMNS:
+        print(
+            f"⚠️ WARNING: Watchlist header does not match expected columns.\n"
+            f"  Expected: {WATCHLIST_COLUMNS}\n  Found:    {header}\n"
+            f"  Proceeding without modifying the sheet."
+        )
 
     _watchlist_sheet_cache = sheet
     return sheet
@@ -127,8 +144,9 @@ def get_company_info(symbol):
         return {"fullname": symbol, "sector": "Unknown", "industry": "Unknown"}
 
 
-def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown"):
-    """Adds a new stock row. Returns a status message string."""
+def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown", target=""):
+    """Adds a new stock row. Returns a status message string.
+    target defaults to blank — set it afterward via /ustgt SYMBOL VALUE."""
     sheet = get_sheet()
     symbol = symbol.strip().upper()
 
@@ -144,10 +162,11 @@ def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown"):
         info["industry"],
         quantity,
         price,
-        "",   # cmp — filled on next /scan
+        "",   # cmp — filled on next /ss
         stoploss,
-        "",   # stage — filled on next /scan
+        "",   # stage — filled on next /ss
         invest_type,
+        target,
     ]
     sheet.append_row(row)
     return f"✅ Added {symbol} ({info['fullname']}, {info['sector']})"
@@ -228,7 +247,7 @@ def update_scan_result(symbol, cmp_value, stage):
 
 # ---------------------------------------------------------------------------
 # Watchlist — a separate, lighter-weight tab (no quantity/price/stoploss/
-# investType, since these aren't holdings, just symbols you're tracking).
+# Type, since these aren't holdings, just symbols you're tracking).
 # ---------------------------------------------------------------------------
 
 def add_watchlist_stock(symbol):

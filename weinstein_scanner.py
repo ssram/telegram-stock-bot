@@ -90,8 +90,25 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
         df["Stage2Weeks"] = stage2_weeks
 
         latest = df.iloc[-1]
-        cmp = round(latest["Close"], 2)
+        weekly_close = round(latest["Close"], 2)
         stage = latest["Stage"]
+
+        # cmp should reflect the actual current/live market price, not the
+        # latest weekly candle's close — those can differ meaningfully
+        # (the current week's candle isn't finalized yet, or the stock
+        # moved intraday since the last weekly bar was formed). Fetch a
+        # live quote separately; fall back to the weekly close only if
+        # that fails for some reason.
+        cmp = weekly_close
+        try:
+            try:
+                live_price = ticker.fast_info["last_price"]
+            except Exception:
+                live_price = ticker.fast_info.last_price
+            if live_price:
+                cmp = round(live_price, 2)
+        except Exception:
+            pass  # keep weekly_close as the fallback
 
         result = {
             "Sector": sector,
@@ -128,11 +145,16 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
         return None
 
 
-def run_scan(notify=True):
+def run_scan(notify=True, generate_csv=False):
     """
     Runs the full scan over every symbol in the Google Sheet.
-    Writes CMP + Stage back to the Sheet for every symbol (Stage 2 or not).
-    Sends a Telegram summary + CSV of Stage 2 stocks if notify=True.
+    Writes CMP + Stage back to the Sheet for every symbol (Stage 2 or not),
+    unconditionally — this happens regardless of whether the symbol is
+    Stage 2 or not, and regardless of generate_csv/notify.
+    Sends a Telegram summary table if notify=True.
+    Only generates and attaches the CSV file if generate_csv=True — this
+    avoids writing/uploading a file on every single scan when nobody asked
+    for it.
     """
     symbols = get_all_symbols()
 
@@ -150,7 +172,8 @@ def run_scan(notify=True):
         if result is None:
             continue
 
-        # Always write the latest CMP + Stage back to the Sheet
+        # Always write the latest CMP + Stage back to the Sheet, for every
+        # symbol scanned — not just Stage 2 hits.
         update_scan_result(symbol, result["CMP"], result["Stage"])
 
         if result["is_stage2"]:
@@ -162,20 +185,19 @@ def run_scan(notify=True):
             send_message("❌ No Stage 2 stocks found in this scan.")
         return
 
-    output = pd.DataFrame(stage2_results)
-    output.sort_values(
-        by=["Sector", "Weeks in Stage2", "% Above SMA"],
-        ascending=[True, False, False],
-        inplace=True,
-    )
-    output.to_csv(OUTPUT_CSV, index=False)
-
-    print(output)
-    print(f"\n✅ Saved: {OUTPUT_CSV}")
+    if generate_csv:
+        output = pd.DataFrame(stage2_results)
+        output.sort_values(
+            by=["Sector", "Weeks in Stage2", "% Above SMA"],
+            ascending=[True, False, False],
+            inplace=True,
+        )
+        output.to_csv(OUTPUT_CSV, index=False)
+        print(output)
+        print(f"\n✅ Saved: {OUTPUT_CSV}")
 
     if notify:
-        # Ascending by symbol for the on-screen table (the CSV keeps the
-        # sector/strength sort above, since that's more useful in a file).
+        # Ascending by symbol for the on-screen table.
         table_rows = sorted(stage2_results, key=lambda r: r["Symbol"])
         headers = ["SYMBOL", "% ABOVE SMA", "WEEKS"]
         rows = [
@@ -187,17 +209,22 @@ def run_scan(notify=True):
             + build_table(headers, rows)
         )
         if len(stage2_results) > 30:
-            summary += f"\n_...and {len(stage2_results) - 30} more, see attached CSV_"
+            summary += f"\n_...and {len(stage2_results) - 30} more_"
+        if not generate_csv:
+            summary += "\n_Send `/ss csv` to get a downloadable file._"
 
         send_message(summary)
-        send_document(OUTPUT_CSV, caption="Full Stage 2 scan results")
+        if generate_csv:
+            send_document(OUTPUT_CSV, caption="Full Stage 2 scan results")
 
 
-def run_watchlist_scan(notify=True):
+def run_watchlist_scan(notify=True, generate_csv=False):
     """
     Runs Weinstein Stage Analysis over every symbol on the Watchlist tab.
-    Writes CMP + Stage back for every symbol, and sends a Telegram summary
-    of which watchlist stocks are currently Stage 2 (potential entries).
+    Writes CMP + Stage back for EVERY symbol scanned — unconditionally,
+    regardless of whether it's Stage 2 or not — this is what keeps the
+    Watchlist tab's cmp/stage columns current on every /sw run.
+    Only generates/attaches the CSV if generate_csv=True.
     """
     symbols = get_watchlist_symbols()
 
@@ -213,8 +240,14 @@ def run_watchlist_scan(notify=True):
         result = analyze_stock(symbol)
 
         if result is None:
+            # analyze_stock returned None (e.g. insufficient history, or a
+            # yfinance fetch error) — cmp/stage cannot be updated for this
+            # symbol this run, since no data was returned at all.
+            print(f"  -> no result for {symbol}, cmp/stage not updated this run")
             continue
 
+        # This runs for every symbol scanned, Stage 2 or not — confirmed
+        # unconditional, not inside the is_stage2 branch below.
         update_watchlist_result(symbol, result["CMP"], result["Stage"])
 
         if result["is_stage2"]:
@@ -226,16 +259,16 @@ def run_watchlist_scan(notify=True):
             send_message("👀 Watchlist scan complete — no Stage 2 stocks right now.")
         return
 
-    output = pd.DataFrame(stage2_results)
-    output.sort_values(
-        by=["Sector", "Weeks in Stage2", "% Above SMA"],
-        ascending=[True, False, False],
-        inplace=True,
-    )
-    output.to_csv(WATCHLIST_OUTPUT_CSV, index=False)
-
-    print(output)
-    print(f"\n✅ Saved: {WATCHLIST_OUTPUT_CSV}")
+    if generate_csv:
+        output = pd.DataFrame(stage2_results)
+        output.sort_values(
+            by=["Sector", "Weeks in Stage2", "% Above SMA"],
+            ascending=[True, False, False],
+            inplace=True,
+        )
+        output.to_csv(WATCHLIST_OUTPUT_CSV, index=False)
+        print(output)
+        print(f"\n✅ Saved: {WATCHLIST_OUTPUT_CSV}")
 
     if notify:
         table_rows = sorted(stage2_results, key=lambda r: r["Symbol"])
@@ -249,10 +282,13 @@ def run_watchlist_scan(notify=True):
             + build_table(headers, rows)
         )
         if len(stage2_results) > 30:
-            summary += f"\n_...and {len(stage2_results) - 30} more, see attached CSV_"
+            summary += f"\n_...and {len(stage2_results) - 30} more_"
+        if not generate_csv:
+            summary += "\n_Send `/sw csv` to get a downloadable file._"
 
         send_message(summary)
-        send_document(WATCHLIST_OUTPUT_CSV, caption="Full watchlist scan results")
+        if generate_csv:
+            send_document(WATCHLIST_OUTPUT_CSV, caption="Full watchlist scan results")
 
 
 if __name__ == "__main__":

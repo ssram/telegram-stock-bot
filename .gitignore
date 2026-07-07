@@ -3,3 +3,4 @@ service_account.json
 *.pyc
 __pycache__/
 weinstein_stage2.csv
+.idea
