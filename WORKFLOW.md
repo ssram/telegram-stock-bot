@@ -88,6 +88,25 @@ One spreadsheet, two tabs.
 | `stage` | Auto (`/ss`) | Weinstein stage, updated on each scan |
 | `Type` | User | e.g. LongTerm, Swing |
 | `target` | User (`/ustgt`) | Target price, optional — used by `/lstg` |
+| `emaexit` | Auto (`/ss`) | Exit-signal reference — see below for how it's chosen |
+
+**How `emaexit` is chosen** (in `weinstein_scanner.py`'s `compute_emaexit()`):
+the stock's `Type` field determines which weekly EMA to use, matched
+case-insensitively. The cell stores a **label** (e.g. `EMA20`), not the
+EMA's numeric value — easier to scan at a glance than a price number:
+
+| Type value | emaexit stored | Condition |
+|---|---|---|
+| `swg` | `"EMA10"` | Always — no crossing check |
+| `pos` | `"EMA20"` | Always — no crossing check |
+| `lt` | `"EMA30"` | Always — no crossing check |
+| anything else (blank, `Unknown`, typos) | cascading check | EMA30 first: if `cmp < EMA30`, store `"EMA30"`. Else EMA20: if `cmp < EMA20`, store `"EMA20"`. Else EMA10: if `cmp < EMA10`, store `"EMA10"`. If price is above all three, stores `"noworries"` |
+
+"Crossed"/condition here means the current price has fallen *below*
+that EMA — a bearish/exit warning signal, not a bullish one. This same
+`compute_emaexit()` function is reused for the Watchlist tab too (see
+below) — always via the cascade path there, since watchlist symbols
+have no `Type` field.
 
 ### Watchlist tab (auto-created on first use)
 
@@ -99,6 +118,7 @@ One spreadsheet, two tabs.
 | `industry` | Auto (yfinance) | |
 | `cmp` | Auto (`/sw`) | |
 | `stage` | Auto (`/sw`) | |
+| `emaexit` | Auto (`/sw`) | Same cascade rule as Holdings (EMA30 → EMA20 → EMA10 → `noworries`) — always the cascade path, since there's no `Type` field here to trigger the swg/pos/lt direct mapping |
 
 No `quantity`/`price`/`stoploss`/`Type` on the Watchlist tab —
 these aren't positions, just symbols being tracked.
@@ -137,6 +157,7 @@ differ, especially mid-week before the current week's candle finalizes.
 | `/qssl` | `/qssl SYMBOL` | Query the current stoploss for a stock |
 | `/lssl` | `/lssl [ss]` | List holdings where `cmp <= stoploss`. `ss` refreshes cmp/stage first |
 | `/lstg` | `/lstg [ss]` | List holdings where `cmp > target` (skips stocks with no target set). `ss` refreshes cmp/stage first |
+| `/it` | `/it [ss]` | List holdings whose `emaexit` is not `noworries` — i.e. an exit signal has triggered — grouped by `Type`. `ss` refreshes cmp/stage/emaexit first |
 | `/ss` | `/ss [csv]` | Scan holdings, write back `cmp`/`stage` for every symbol, post summary table (CSV optional) |
 | `/ls` | `/ls [ss] [csv]` | List all holdings, ascending, as a table. `ss` refreshes cmp/stage first (silent scan); `csv` also attaches a full CSV |
 | `/lsstg` | `/lsstg` | List holdings grouped by stage (one table per stage, each with a count) |
@@ -226,20 +247,24 @@ Cloudflare dashboard:
 
 ---
 
-## 6.5. Migrating an existing Sheet (adding the `target` column)
+## 6.5. Migrating an existing Sheet (adding new columns)
 
-If your Holdings tab was created before `target` was added, add it
-manually: open the Sheet, go to the first empty column after `Type`
-(column K if you haven't added other columns), and type `target` as the
-header — exact spelling and case matter, since it's compared against
-`sheets.py`'s `COLUMNS` list. Existing rows can be left blank in that
-column; `/lssl`/`/lstg` simply skip any stock with no target set, and
-`/ustgt` can be used to fill it in per stock afterward.
+If your Holdings tab was created before `target`/`emaexit` were added,
+add them manually: open the Sheet, and after the last existing column,
+add these headers in order — `target`, `emaexit` — exact spelling and
+case matter, since they're compared against `sheets.py`'s `COLUMNS`
+list. Existing rows can be left blank in these columns; they'll be
+filled in automatically by the next `/ss` run (for `emaexit`) or
+manually via `/ustgt` (for `target`).
 
 Since the header-mismatch check is non-destructive (see Security below),
 forgetting this step won't corrupt anything — it'll just print a warning
-in the Actions log and `target`-related commands will have nothing to
-read until the column exists with the right name.
+in the Actions log and these columns will have nothing to read/write
+until they exist with the right names in the right order.
+
+The Watchlist tab similarly needs an `emaexit` column added after
+`stage`, if it was created before this was added — same non-destructive
+behavior applies there too.
 
 ## 7. Setting up the event-driven pipeline (one-time)
 
@@ -329,6 +354,19 @@ shared resources regardless of which branch or trigger ran the code.
 
 ## 10. Known limitations
 
+- **Sender name display**: Telegram's `username` (public `@handle`) only
+  exists if the sender has explicitly set one in their account. The
+  Cloudflare Worker falls back to `first_name`, then the literal string
+  `"unknown"`, in that order — so `"Scan requested by ..."` messages may
+  show a first name rather than an `@handle` depending on the sender's
+  Telegram settings. This is expected, not a bug.
+- **Google Sheets write quota**: `/ss` and `/sw` batch every cell update
+  for the entire scan into a single API call (`batch_update_holdings`/
+  `batch_update_watchlist` in `sheets.py`), specifically to stay under
+  Google's 60-writes/minute/user quota. If you ever add more per-stock
+  write operations to the scan, keep using this batched pattern rather
+  than calling `update_cell()` per field per stock — that's what caused
+  a `429 Quota exceeded` error previously.
 - **`/nifty` has no live option-premium data**: SL/target are in Nifty
   index points only. yfinance also doesn't reliably support NSE options
   contracts directly, so the actual option premium, its own SL/target,

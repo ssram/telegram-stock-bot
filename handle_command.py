@@ -23,6 +23,7 @@ Commands — Holdings
   /qssl SYMBOL                         query stoploss for a stock
   /lssl [ss]                           list holdings where cmp <= stoploss
   /lstg [ss]                           list holdings where cmp > target
+  /it [ss]                             list holdings with an active exit signal (emaexit != noworries), grouped by Type
   /nifty                               Nifty EMA9/EMA21 trend signal + ATM strike suggestion
   /ss [csv]                            scan stocks (csv attaches a downloadable file)
   /ls [ss] [csv]                       list stocks (ascending); ss=scan first, csv=attach file
@@ -64,7 +65,7 @@ from sheets import (
     get_watchlist_by_stage,
 )
 from weinstein_scanner import run_scan, run_watchlist_scan
-from formatting import build_holdings_table, build_watchlist_table, build_grouped_by_stage, build_table
+from formatting import build_holdings_table, build_watchlist_table, build_grouped_by_stage, build_grouped_by_type, build_table
 from nifty_signal import get_nifty_signal, format_nifty_signal_message
 
 HOLDINGS_LIST_CSV = "holdings_list.csv"
@@ -204,6 +205,35 @@ def handle_target_hit(parts):
     send_message(build_holdings_table(hits, title=f"Target Hit ({len(hits)})"))
 
 
+def handle_exit_alerts(parts):
+    """
+    /it [ss]
+    Lists holdings whose emaexit is NOT "noworries" — i.e. an actual
+    exit signal has triggered — grouped by Type (swg/pos/lt/etc.), same
+    presentation style as the stage-grouped views. ss refreshes
+    cmp/stage/emaexit first.
+    """
+    args = [p.lower() for p in parts[1:]]
+    do_scan = "ss" in args
+
+    if do_scan:
+        send_message("🔄 Refreshing prices/stages first...")
+        run_scan(notify=False, generate_csv=False)
+
+    records = get_all_holdings_records()
+    flagged = [
+        r for r in records
+        if str(r.get("emaexit", "")).strip().lower() not in ("", "noworries")
+    ]
+
+    if not flagged:
+        send_message("✅ No exit signals right now — everything's noworries.")
+        return
+
+    flagged.sort(key=lambda r: str(r.get("stockName", "")).upper())
+    send_message(build_grouped_by_type(flagged, title_prefix="Exit Alert — "))
+
+
 def handle_list_holdings(parts):
     """
     /ls [ss] [csv]
@@ -300,6 +330,7 @@ def get_help_text():
         ["/us", "update stock field"],
         ["/qssl", "query stoploss"],
         ["/lssl /lstg", "stoploss / target hits"],
+        ["/it", "exit alerts by type"],
         ["/nifty", "nifty trend signal"],
         ["/ss /ls", "scan / list holdings"],
         ["/aw /dw", "add / delete watch"],
@@ -326,6 +357,7 @@ def get_helps_text():
         ["/qssl", "SYMBOL", "query stoploss"],
         ["/lssl", "[ss]", "list stocks where cmp <= stoploss"],
         ["/lstg", "[ss]", "list stocks where cmp > target"],
+        ["/it", "[ss]", "list exit-signal stocks, grouped by Type"],
         ["/nifty", "-", "Nifty EMA9/EMA21 trend + ATM strike suggestion"],
         ["/ss", "[csv]", "scan holdings"],
         ["/ls", "[ss] [csv]", "list holdings (asc)"],
@@ -383,7 +415,7 @@ def main():
 
     allowed_users = get_allowed_users()
     if allowed_users and user_id not in allowed_users:
-        send_message(f"⛔ Unauthorized user (@{username}, id={user_id}) tried: {text}")
+        send_message(f"⛔ Unauthorized user ({username}, id={user_id}) tried: {text}")
         return
 
     parts = text.split()
@@ -413,10 +445,12 @@ def main():
             handle_stoploss_hit(parts)
         elif command == "/lstg":
             handle_target_hit(parts)
+        elif command == "/it":
+            handle_exit_alerts(parts)
         elif command == "/nifty":
             send_message(format_nifty_signal_message(get_nifty_signal()))
         elif command == "/ss":
-            send_message(f"🔍 Scan requested by @{username}, running...")
+            send_message(f"🔍 Scan requested by {username}, running...")
             run_scan(notify=True, generate_csv=_wants_csv(parts))
         elif command == "/ls":
             handle_list_holdings(parts)
@@ -435,7 +469,7 @@ def main():
         elif command == "/dw":
             send_message(handle_removewatchlist(parts))
         elif command == "/sw":
-            send_message(f"🔍 Watchlist scan requested by @{username}, running...")
+            send_message(f"🔍 Watchlist scan requested by {username}, running...")
             run_watchlist_scan(notify=True, generate_csv=_wants_csv(parts))
         elif command == "/lw":
             handle_list_watchlist(parts)
