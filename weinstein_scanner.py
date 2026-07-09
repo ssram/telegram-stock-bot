@@ -3,14 +3,15 @@ weinstein_scanner.py
 =====================
 Weinstein Stage Analysis scanner.
 
-Reads the list of symbols from the Google Sheet (instead of a local CSV),
-analyzes each one on weekly data, writes the latest CMP + Stage back into
-the Sheet for every symbol, and posts a summary of current Stage 2 stocks
-to Telegram.
+Reads holdings from the Google Sheet, analyzes each one on weekly data,
+and writes results back in a SINGLE batched API call per scan (not one
+call per cell) — this avoids hitting Google Sheets' write-quota (60
+writes/minute/user), which individual update_cell() calls blew past once
+enough stocks were being scanned.
 
 Can be run two ways:
   - Directly: `python weinstein_scanner.py` (used by the daily cron workflow)
-  - Imported: `from weinstein_scanner import run_scan` (used by /scan command)
+  - Imported: `from weinstein_scanner import run_scan` (used by /ss command)
 """
 
 import os
@@ -18,10 +19,10 @@ import pandas as pd
 import yfinance as yf
 
 from sheets import (
-    get_all_symbols,
-    update_scan_result,
+    get_all_holdings_records,
+    batch_update_holdings,
     get_watchlist_symbols,
-    update_watchlist_result,
+    batch_update_watchlist,
 )
 from telegram_bot import send_message, send_document
 from formatting import build_table
@@ -30,6 +31,44 @@ MA_LENGTH = 30
 WITHIN_RANGE_PCT = 0
 OUTPUT_CSV = "weinstein_stage2.csv"
 WATCHLIST_OUTPUT_CSV = "weinstein_watchlist_scan.csv"
+
+# Which weekly EMA to use as the exit-signal reference, based on the
+# stock's Type field. Anything not exactly one of these three (blank,
+# "Unknown", typos, etc.) falls back to the cascading check in
+# compute_emaexit() below.
+EMA_EXIT_TYPE_MAP = {
+    "swg": "EMA10",
+    "pos": "EMA20",
+    "lt": "EMA30",
+}
+
+
+def compute_emaexit(invest_type, cmp_value, ema10, ema20, ema30):
+    """
+    Returns which weekly EMA is the relevant exit-signal reference for
+    this stock, as a label (e.g. "EMA20"), not a raw value — easier to
+    scan at a glance than a price number:
+      - If Type is exactly 'swg'/'pos'/'lt' (case-insensitive): the
+        corresponding EMA's name, directly, no condition.
+      - Otherwise (blank, 'Unknown', typos, etc.): cascade check —
+        EMA30 first, then EMA20, then EMA10. "Crossed" means the current
+        price has fallen below that EMA (a bearish/exit signal). Returns
+        the name of the first one price has fallen below; if price is
+        above all three, returns the string "noworries".
+    """
+    t = (invest_type or "").strip().lower()
+
+    if t in EMA_EXIT_TYPE_MAP:
+        return EMA_EXIT_TYPE_MAP[t]
+
+    if cmp_value < ema30:
+        return "EMA30"
+    elif cmp_value < ema20:
+        return "EMA20"
+    elif cmp_value < ema10:
+        return "EMA10"
+    else:
+        return "noworries"
 
 
 def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT):
@@ -56,6 +95,9 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
             return None
 
         df["SMA30"] = df["Close"].rolling(ma_length).mean()
+        df["EMA10"] = df["Close"].ewm(span=10, adjust=False).mean()
+        df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
+        df["EMA30"] = df["Close"].ewm(span=30, adjust=False).mean()
         df = df.dropna()
 
         trend = "down"
@@ -117,6 +159,12 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
             "CMP": cmp,
             "Stage": stage,
             "is_stage2": stage == "Stage 2",
+            # Weekly EMAs — exit-signal reference (e.g. price closing below
+            # EMA30 is a common weekly exit trigger). Written back to the
+            # Sheet for every symbol scanned, not just Stage 2 hits.
+            "EMA10": round(latest["EMA10"], 2),
+            "EMA20": round(latest["EMA20"], 2),
+            "EMA30": round(latest["EMA30"], 2),
         }
 
         if stage == "Stage 2":
@@ -147,42 +195,59 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
 
 def run_scan(notify=True, generate_csv=False):
     """
-    Runs the full scan over every symbol in the Google Sheet.
-    Writes CMP + Stage back to the Sheet for every symbol (Stage 2 or not),
-    unconditionally — this happens regardless of whether the symbol is
-    Stage 2 or not, and regardless of generate_csv/notify.
+    Runs the full scan over every holding in the Google Sheet.
+    Writes cmp/stage/emaexit back for every symbol scanned (Stage 2 or
+    not), regardless of generate_csv/notify — but all in ONE batched
+    Sheets API call at the end, not one call per cell per stock.
     Sends a Telegram summary table if notify=True.
-    Only generates and attaches the CSV file if generate_csv=True — this
-    avoids writing/uploading a file on every single scan when nobody asked
-    for it.
+    Only generates and attaches the CSV if generate_csv=True.
     """
-    symbols = get_all_symbols()
+    holdings = get_all_holdings_records()
 
-    if not symbols:
+    if not holdings:
         if notify:
             send_message("⚠️ No stocks in the sheet yet. Use /as to add some.")
         return
 
     stage2_results = []
+    sheet_updates = []
 
-    for symbol in symbols:
+    for holding in holdings:
+        symbol = holding.get("stockName")
+        if not symbol:
+            continue
+
         print(f"Scanning {symbol}")
         result = analyze_stock(symbol)
 
         if result is None:
             continue
 
-        # Always write the latest CMP + Stage back to the Sheet, for every
-        # symbol scanned — not just Stage 2 hits.
-        update_scan_result(symbol, result["CMP"], result["Stage"])
+        emaexit = compute_emaexit(
+            holding.get("Type"), result["CMP"],
+            result["EMA10"], result["EMA20"], result["EMA30"],
+        )
+
+        sheet_updates.append({
+            "symbol": symbol,
+            "cmp": result["CMP"],
+            "stage": result["Stage"],
+            "emaexit": emaexit,
+        })
 
         if result["is_stage2"]:
             result.pop("is_stage2")
             stage2_results.append(result)
 
+    # Single batched write for the entire scan, regardless of how many
+    # stocks were scanned — this is what avoids the write-quota error.
+    batch_update_holdings(sheet_updates)
+
+    scan_header = f"✅ Scan complete — {len(sheet_updates)} stock(s) scanned."
+
     if not stage2_results:
         if notify:
-            send_message("❌ No Stage 2 stocks found in this scan.")
+            send_message(f"{scan_header}\n📊 No stocks currently in Stage 2.")
         return
 
     if generate_csv:
@@ -205,7 +270,7 @@ def run_scan(notify=True, generate_csv=False):
             for r in table_rows[:30]
         ]
         summary = (
-            f"📈 *Stage 2 scan complete* — {len(stage2_results)} stock(s) found\n"
+            f"{scan_header}\n📈 {len(stage2_results)} in Stage 2:\n"
             + build_table(headers, rows)
         )
         if len(stage2_results) > 30:
@@ -221,9 +286,8 @@ def run_scan(notify=True, generate_csv=False):
 def run_watchlist_scan(notify=True, generate_csv=False):
     """
     Runs Weinstein Stage Analysis over every symbol on the Watchlist tab.
-    Writes CMP + Stage back for EVERY symbol scanned — unconditionally,
-    regardless of whether it's Stage 2 or not — this is what keeps the
-    Watchlist tab's cmp/stage columns current on every /sw run.
+    Writes cmp/stage back for EVERY symbol scanned in ONE batched Sheets
+    API call at the end (same quota-avoidance fix as run_scan above).
     Only generates/attaches the CSV if generate_csv=True.
     """
     symbols = get_watchlist_symbols()
@@ -234,29 +298,39 @@ def run_watchlist_scan(notify=True, generate_csv=False):
         return
 
     stage2_results = []
+    sheet_updates = []
 
     for symbol in symbols:
         print(f"Scanning watchlist symbol {symbol}")
         result = analyze_stock(symbol)
 
         if result is None:
-            # analyze_stock returned None (e.g. insufficient history, or a
-            # yfinance fetch error) — cmp/stage cannot be updated for this
-            # symbol this run, since no data was returned at all.
             print(f"  -> no result for {symbol}, cmp/stage not updated this run")
             continue
 
-        # This runs for every symbol scanned, Stage 2 or not — confirmed
-        # unconditional, not inside the is_stage2 branch below.
-        update_watchlist_result(symbol, result["CMP"], result["Stage"])
+        # Watchlist symbols have no Type field, so this always goes
+        # through compute_emaexit's cascade path (EMA30 -> EMA20 -> EMA10
+        # -> "noworries") rather than the swg/pos/lt direct mapping.
+        emaexit = compute_emaexit(None, result["CMP"], result["EMA10"], result["EMA20"], result["EMA30"])
+
+        sheet_updates.append({
+            "symbol": symbol,
+            "cmp": result["CMP"],
+            "stage": result["Stage"],
+            "emaexit": emaexit,
+        })
 
         if result["is_stage2"]:
             result.pop("is_stage2")
             stage2_results.append(result)
 
+    batch_update_watchlist(sheet_updates)
+
+    scan_header = f"✅ Watchlist scan complete — {len(sheet_updates)} stock(s) scanned."
+
     if not stage2_results:
         if notify:
-            send_message("👀 Watchlist scan complete — no Stage 2 stocks right now.")
+            send_message(f"{scan_header}\n📊 No stocks currently in Stage 2.")
         return
 
     if generate_csv:
@@ -278,7 +352,7 @@ def run_watchlist_scan(notify=True, generate_csv=False):
             for r in table_rows[:30]
         ]
         summary = (
-            f"👀 *Watchlist scan complete* — {len(stage2_results)} Stage 2 stock(s) found\n"
+            f"{scan_header}\n📈 {len(stage2_results)} in Stage 2:\n"
             + build_table(headers, rows)
         )
         if len(stage2_results) > 30:

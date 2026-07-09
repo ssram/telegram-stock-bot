@@ -7,7 +7,7 @@ Sheet columns (in this exact order — row 1 must be a header row with these
 names):
 
     stockName, fullname, sector, industry, quantity, price, cmp,
-    stoploss, stage, Type, target
+    stoploss, stage, Type, target, emaexit
 
 - stockName : NSE symbol, e.g. RELIANCE (this is the unique key for lookups)
 - fullname  : Company full name (auto-filled from yfinance)
@@ -20,6 +20,9 @@ names):
 - stage     : Weinstein stage, e.g. "Stage 2" (auto-updated on each /ss)
 - Type      : e.g. "LongTerm" / "Swing" / "Positional" (user-provided)
 - target    : Target price (user-provided, optional — set via /ustgt)
+- emaexit   : Weekly EMA used as an exit-signal reference (auto-updated on
+              each /ss). Which EMA (10/20/30) is picked depends on the
+              stock's Type — see EMA_EXIT_MAP in weinstein_scanner.py.
 """
 
 import os
@@ -34,11 +37,11 @@ SCOPES = [
 
 COLUMNS = [
     "stockName", "fullname", "sector", "industry", "quantity",
-    "price", "cmp", "stoploss", "stage", "Type", "target",
+    "price", "cmp", "stoploss", "stage", "Type", "target", "emaexit",
 ]
 
 WATCHLIST_TAB_NAME = "Watchlist"
-WATCHLIST_COLUMNS = ["stockName", "fullname", "sector", "industry", "cmp", "stage"]
+WATCHLIST_COLUMNS = ["stockName", "fullname", "sector", "industry", "cmp", "stage", "emaexit"]
 
 _sheet_cache = None
 _spreadsheet_cache = None
@@ -167,6 +170,7 @@ def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown", ta
         "",   # stage — filled on next /ss
         invest_type,
         target,
+        "",   # emaexit — filled on next /ss
     ]
     sheet.append_row(row)
     return f"✅ Added {symbol} ({info['fullname']}, {info['sector']})"
@@ -230,19 +234,53 @@ def get_all_symbols():
     return [r["stockName"] for r in records if r.get("stockName")]
 
 
-def update_scan_result(symbol, cmp_value, stage):
-    """Called by the scanner after analyzing a symbol, to write back cmp + stage."""
+def batch_update_holdings(updates):
+    """
+    Writes cmp/stage/emaexit for MANY stocks in a SINGLE Sheets API call,
+    instead of one update_cell() call per field per stock. This is what
+    avoids Google Sheets' write-quota (60 writes/minute/user) — the old
+    per-cell approach could hit that quota with as few as ~15-20 stocks
+    in one scan.
+
+    updates: list of dicts, each with keys:
+      symbol (required), cmp, stage, emaexit (all optional — only
+      fields present are written).
+    """
+    if not updates:
+        return
+
     sheet = get_sheet()
-    row_num = _find_row(sheet, symbol)
 
-    if not row_num:
-        return  # symbol was removed mid-scan, skip silently
+    # One read call to map every symbol to its row number, instead of a
+    # separate lookup per stock.
+    col_values = sheet.col_values(1)
+    row_map = {
+        val.strip().upper(): i
+        for i, val in enumerate(col_values, start=1)
+        if val.strip()
+    }
 
-    cmp_col = COLUMNS.index("cmp") + 1
-    stage_col = COLUMNS.index("stage") + 1
+    field_columns = {
+        "cmp": COLUMNS.index("cmp") + 1,
+        "stage": COLUMNS.index("stage") + 1,
+        "emaexit": COLUMNS.index("emaexit") + 1,
+    }
 
-    sheet.update_cell(row_num, cmp_col, cmp_value)
-    sheet.update_cell(row_num, stage_col, stage)
+    data = []
+    for update in updates:
+        symbol = str(update.get("symbol", "")).strip().upper()
+        row_num = row_map.get(symbol)
+        if not row_num:
+            continue  # symbol was removed mid-scan, skip silently
+
+        for field, col_num in field_columns.items():
+            if field not in update or update[field] is None:
+                continue
+            a1 = gspread.utils.rowcol_to_a1(row_num, col_num)
+            data.append({"range": a1, "values": [[update[field]]]})
+
+    if data:
+        sheet.batch_update(data)  # ONE API call for the whole scan
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +298,7 @@ def add_watchlist_stock(symbol):
 
     info = get_company_info(symbol)
 
-    row = [symbol, info["fullname"], info["sector"], info["industry"], "", ""]
+    row = [symbol, info["fullname"], info["sector"], info["industry"], "", "", ""]
     sheet.append_row(row)
     return f"✅ Added {symbol} ({info['fullname']}) to watchlist."
 
@@ -298,16 +336,44 @@ def get_watchlist_symbols():
     return [r["stockName"] for r in records if r.get("stockName")]
 
 
-def update_watchlist_result(symbol, cmp_value, stage):
-    """Called by the watchlist scanner after analyzing a symbol."""
-    sheet = get_watchlist_sheet()
-    row_num = _find_row(sheet, symbol)
+def batch_update_watchlist(updates):
+    """
+    Writes cmp/stage for MANY watchlist symbols in a SINGLE Sheets API
+    call — same quota-avoidance fix as batch_update_holdings above.
 
-    if not row_num:
+    updates: list of dicts, each with keys: symbol (required), cmp,
+    stage (both optional — only fields present are written).
+    """
+    if not updates:
         return
 
-    cmp_col = WATCHLIST_COLUMNS.index("cmp") + 1
-    stage_col = WATCHLIST_COLUMNS.index("stage") + 1
+    sheet = get_watchlist_sheet()
 
-    sheet.update_cell(row_num, cmp_col, cmp_value)
-    sheet.update_cell(row_num, stage_col, stage)
+    col_values = sheet.col_values(1)
+    row_map = {
+        val.strip().upper(): i
+        for i, val in enumerate(col_values, start=1)
+        if val.strip()
+    }
+
+    field_columns = {
+        "cmp": WATCHLIST_COLUMNS.index("cmp") + 1,
+        "stage": WATCHLIST_COLUMNS.index("stage") + 1,
+        "emaexit": WATCHLIST_COLUMNS.index("emaexit") + 1,
+    }
+
+    data = []
+    for update in updates:
+        symbol = str(update.get("symbol", "")).strip().upper()
+        row_num = row_map.get(symbol)
+        if not row_num:
+            continue
+
+        for field, col_num in field_columns.items():
+            if field not in update or update[field] is None:
+                continue
+            a1 = gspread.utils.rowcol_to_a1(row_num, col_num)
+            data.append({"range": a1, "values": [[update[field]]]})
+
+    if data:
+        sheet.batch_update(data)
