@@ -16,14 +16,17 @@ Commands — Holdings
   /ds SYMBOL                           delete stock
   /us SYMBOL FIELD VALUE               update stock (FIELD: quantity|price|stoploss|Type)
   /usqty SYMBOL VALUE                  update quantity
+  /usqtyadd SYMBOL VALUE               add VALUE to existing quantity
+  /usqtysub SYMBOL VALUE               subtract VALUE from existing quantity
   /usbuy SYMBOL VALUE                  update buy price
   /ussl SYMBOL VALUE                   update stoploss
   /usit SYMBOL VALUE                   update Type (investment type)
   /ustgt SYMBOL VALUE                  update target price
+  /uscs SYMBOL core|satellite          update Core/Satellite classification
   /qssl SYMBOL                         query stoploss for a stock
   /lssl [ss]                           list holdings where cmp <= stoploss
   /lstg [ss]                           list holdings where cmp > target
-  /it [ss]                             list holdings with an active exit signal (emaexit != noworries), grouped by Type
+  /it [ss]                             list holdings with an Entry or Exit status (not Hold), grouped by status
   /nifty                               Nifty EMA9/EMA21 trend signal + ATM strike suggestion
   /ss [csv]                            scan stocks (csv attaches a downloadable file)
   /ls [ss] [csv]                       list stocks (ascending); ss=scan first, csv=attach file
@@ -82,6 +85,10 @@ FIELD_ALIASES = {
     "target": "target",
     "type": "Type",
     "investtype": "Type",  # kept for backward compatibility with older usage
+    "cs": "coreSatellite",
+    "coresatellite": "coreSatellite",
+    # marketCap is deliberately NOT here — it's automatic-only, set once
+    # at add time from yfinance, not user-editable via /us.
 }
 
 
@@ -129,6 +136,69 @@ def _single_field_update(parts, command, field):
     if len(parts) < 3:
         return f"Usage: `{command} SYMBOL VALUE`"
     return _apply_field_update(parts[1], field, parts[2])
+
+
+def handle_update_core_satellite(parts):
+    if len(parts) < 3:
+        return "Usage: `/uscs SYMBOL core|satellite`"
+    symbol = parts[1]
+    value = parts[2].strip().lower()
+    if value not in ("core", "satellite"):
+        return "⚠️ Value must be exactly 'core' or 'satellite'."
+    return update_stock(symbol, coreSatellite=value.capitalize())
+
+
+def _adjust_quantity(parts, command, sign):
+    """
+    Shared logic for /usqtyadd (+) and /usqtysub (-): reads the stock's
+    current quantity, applies the delta, and writes the new total back.
+    Rejects (doesn't clamp) if the result would go negative — safer than
+    silently flooring at zero, since that could hide a typo'd VALUE.
+    """
+    if len(parts) < 3:
+        return f"Usage: `{command} SYMBOL VALUE`"
+
+    symbol = parts[1].strip().upper()
+    try:
+        delta = float(parts[2])
+    except ValueError:
+        return "⚠️ VALUE must be a number."
+
+    current = None
+    for r in get_all_holdings_records():
+        if str(r.get("stockName", "")).strip().upper() == symbol:
+            current = r.get("quantity")
+            break
+
+    if current is None:
+        return f"⚠️ {symbol} not found in holdings."
+
+    try:
+        current_qty = float(current) if current not in (None, "") else 0
+    except (TypeError, ValueError):
+        current_qty = 0
+
+    new_qty = current_qty + (delta * sign)
+
+    if new_qty < 0:
+        if sign > 0:
+            detail = f"Adding {delta} to current quantity {current_qty}"
+        else:
+            detail = f"Subtracting {delta} from current quantity {current_qty}"
+        return f"⚠️ {detail} for {symbol} would go negative ({new_qty}). No change made."
+
+    if new_qty == int(new_qty):
+        new_qty = int(new_qty)
+
+    return update_stock(symbol, quantity=new_qty)
+
+
+def handle_qty_add(parts):
+    return _adjust_quantity(parts, "/usqtyadd", +1)
+
+
+def handle_qty_sub(parts):
+    return _adjust_quantity(parts, "/usqtysub", -1)
 
 
 def handle_query_stoploss(parts):
@@ -208,10 +278,9 @@ def handle_target_hit(parts):
 def handle_exit_alerts(parts):
     """
     /it [ss]
-    Lists holdings whose emaexit is NOT "noworries" — i.e. an actual
-    exit signal has triggered — grouped by Type (swg/pos/lt/etc.), same
-    presentation style as the stage-grouped views. ss refreshes
-    cmp/stage/emaexit first.
+    Lists holdings whose status is NOT "Hold" (i.e. Entry or Exit — an
+    actionable signal), grouped by status. ss refreshes
+    cmp/stage/status first.
     """
     args = [p.lower() for p in parts[1:]]
     do_scan = "ss" in args
@@ -223,15 +292,15 @@ def handle_exit_alerts(parts):
     records = get_all_holdings_records()
     flagged = [
         r for r in records
-        if str(r.get("emaexit", "")).strip().lower() not in ("", "noworries")
+        if str(r.get("status", "")).strip().lower() != "hold"
     ]
 
     if not flagged:
-        send_message("✅ No exit signals right now — everything's noworries.")
+        send_message("✅ No entry/exit signals right now — everything's on Hold.")
         return
 
     flagged.sort(key=lambda r: str(r.get("stockName", "")).upper())
-    send_message(build_grouped_by_type(flagged, title_prefix="Exit Alert — "))
+    send_message(build_grouped_by_type(flagged, type_field="status", title_prefix=""))
 
 
 def handle_list_holdings(parts):
@@ -328,9 +397,10 @@ def get_help_text():
     rows = [
         ["/as /ds", "add / delete stock"],
         ["/us", "update stock field"],
+        ["/uscs", "set core/satellite"],
         ["/qssl", "query stoploss"],
         ["/lssl /lstg", "stoploss / target hits"],
-        ["/it", "exit alerts by type"],
+        ["/it", "entry/exit status"],
         ["/nifty", "nifty trend signal"],
         ["/ss /ls", "scan / list holdings"],
         ["/aw /dw", "add / delete watch"],
@@ -350,14 +420,17 @@ def get_helps_text():
         ["/ds", "SYMBOL", "delete a stock"],
         ["/us", "SYMBOL FIELD VALUE", "update any field"],
         ["/usqty", "SYMBOL VALUE", "update quantity"],
+        ["/usqtyadd", "SYMBOL VALUE", "add VALUE to existing quantity"],
+        ["/usqtysub", "SYMBOL VALUE", "subtract VALUE from existing quantity"],
         ["/usbuy", "SYMBOL VALUE", "update buy price"],
         ["/ussl", "SYMBOL VALUE", "update stoploss"],
         ["/usit", "SYMBOL VALUE", "update Type"],
         ["/ustgt", "SYMBOL VALUE", "update target price"],
+        ["/uscs", "SYMBOL core|satellite", "set Core/Satellite classification"],
         ["/qssl", "SYMBOL", "query stoploss"],
         ["/lssl", "[ss]", "list stocks where cmp <= stoploss"],
         ["/lstg", "[ss]", "list stocks where cmp > target"],
-        ["/it", "[ss]", "list exit-signal stocks, grouped by Type"],
+        ["/it", "[ss]", "list Entry/Exit stocks (not Hold), grouped by status"],
         ["/nifty", "-", "Nifty EMA9/EMA21 trend + ATM strike suggestion"],
         ["/ss", "[csv]", "scan holdings"],
         ["/ls", "[ss] [csv]", "list holdings (asc)"],
@@ -431,6 +504,10 @@ def main():
             send_message(handle_updatestock(parts))
         elif command == "/usqty":
             send_message(_single_field_update(parts, "/usqty", "quantity"))
+        elif command == "/usqtyadd":
+            send_message(handle_qty_add(parts))
+        elif command == "/usqtysub":
+            send_message(handle_qty_sub(parts))
         elif command == "/usbuy":
             send_message(_single_field_update(parts, "/usbuy", "price"))
         elif command == "/ussl":
@@ -439,6 +516,8 @@ def main():
             send_message(_single_field_update(parts, "/usit", "Type"))
         elif command == "/ustgt":
             send_message(_single_field_update(parts, "/ustgt", "target"))
+        elif command == "/uscs":
+            send_message(handle_update_core_satellite(parts))
         elif command == "/qssl":
             send_message(handle_query_stoploss(parts))
         elif command == "/lssl":
