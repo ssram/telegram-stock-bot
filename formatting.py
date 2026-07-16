@@ -67,18 +67,25 @@ def build_table(headers, rows, col_widths=None, max_col_width=16):
     return result
 
 
+_MCAP_SHORT = {"Large Cap": "L", "Mid Cap": "M", "Small Cap": "S", "Unknown": "-"}
+_CORE_SAT_SHORT = {"Core": "C", "Satellite": "S"}
+
+
 def build_holdings_table(records, title="Holdings"):
     """
     records: list of dicts with keys stockName, quantity, price, cmp,
-    stoploss, stage, Type — already sorted by caller.
+    stoploss, stage, Type, status, marketCap, coreSatellite — already
+    sorted by caller.
     """
     if not records:
         return f"*{title}*\n_No stocks found._"
 
-    headers = ["SYMBOL", "QTY", "BUY", "CMP", "SL", "TARGET", "STAGE", "TYPE", "EMAEXIT"]
+    headers = ["SYMBOL", "QTY", "BUY", "CMP", "SL", "TARGET", "STAGE", "TYPE", "STATUS", "MCAP", "C/S"]
     rows = []
     for r in records:
         stage = str(r.get("stage", "") or "-").replace("Stage ", "S")
+        mcap = _MCAP_SHORT.get(r.get("marketCap"), "-")
+        core_sat = _CORE_SAT_SHORT.get(r.get("coreSatellite"), "-")
         rows.append([
             r.get("stockName", ""),
             r.get("quantity", ""),
@@ -88,7 +95,9 @@ def build_holdings_table(records, title="Holdings"):
             r.get("target", "") or "-",
             stage,
             r.get("Type", ""),
-            r.get("emaexit", "") or "-",
+            r.get("status", "") or "-",
+            mcap,
+            core_sat,
         ])
 
     return f"*{title}*\n" + build_table(headers, rows)
@@ -97,12 +106,12 @@ def build_holdings_table(records, title="Holdings"):
 def build_watchlist_table(records, title="Watchlist"):
     """
     records: list of dicts with keys stockName, cmp, stage, sector,
-    emaexit — already sorted by caller.
+    status — already sorted by caller.
     """
     if not records:
         return f"*{title}*\n_No stocks found._"
 
-    headers = ["SYMBOL", "CMP", "STAGE", "SECTOR", "EMAEXIT"]
+    headers = ["SYMBOL", "CMP", "STAGE", "SECTOR", "STATUS"]
     rows = []
     for r in records:
         stage = str(r.get("stage", "") or "-").replace("Stage ", "S")
@@ -111,7 +120,7 @@ def build_watchlist_table(records, title="Watchlist"):
             r.get("cmp", "") or "-",
             stage,
             r.get("sector", "Unknown"),
-            r.get("emaexit", "") or "-",
+            r.get("status", "") or "-",
         ])
 
     return f"*{title}*\n" + build_table(headers, rows)

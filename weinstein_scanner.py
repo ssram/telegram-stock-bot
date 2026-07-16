@@ -32,50 +32,96 @@ WITHIN_RANGE_PCT = 0
 OUTPUT_CSV = "weinstein_stage2.csv"
 WATCHLIST_OUTPUT_CSV = "weinstein_watchlist_scan.csv"
 
-# Which weekly EMA to use as the exit-signal reference, based on the
-# stock's Type field. Anything not exactly one of these three (blank,
-# "Unknown", typos, etc.) falls back to the cascading check in
-# compute_emaexit() below.
-EMA_EXIT_TYPE_MAP = {
-    "swg": "EMA10",
-    "pos": "EMA20",
-    "lt": "EMA30",
-}
+DEFAULT_STATUS = "Hold"
 
 
-def compute_emaexit(invest_type, cmp_value, ema10, ema20, ema30):
+def compute_status(weekly_sma_rising, weekly_below_sma30, daily):
     """
-    Returns which weekly EMA is the relevant exit-signal reference for
-    this stock, as a label (e.g. "EMA20"), not a raw value — easier to
-    scan at a glance than a price number:
-      - If Type is exactly 'swg'/'pos'/'lt' (case-insensitive): the
-        corresponding EMA's name, directly, no condition.
-      - Otherwise (blank, 'Unknown', typos, etc.): cascade check —
-        EMA30 first, then EMA20, then EMA10. "Crossed" means the current
-        price has fallen below that EMA (a bearish/exit signal). Returns
-        the name of the first one price has fallen below; if price is
-        above all three, returns the string "noworries".
+    Determines Entry / Hold / Exit based on weekly + daily signals.
+    Priority: Exit conditions checked first (any true -> Exit), then
+    Entry (all true -> Entry), otherwise Hold (the default).
+
+    daily is a dict with keys: close, prev_close, ema10, prev_ema10,
+    ema21, ema50 — or None if daily data couldn't be fetched, in which
+    case this safely falls back to Hold (can't evaluate day-based rules
+    without daily data).
+
+    Exit (ANY true):
+      1. Close below EMA10 for 2 consecutive days
+      2. Close below EMA21
+      3. EMA10 < EMA21
+      4. Close below EMA50
+      5. Weekly close below the 30-week MA
+
+    Entry (ALL true, and no exit condition triggered):
+      1. Weekly 30W MA is rising
+      2. Daily close > EMA10
+      3. EMA10 > EMA21
+      4. EMA21 > EMA50
     """
-    t = (invest_type or "").strip().lower()
+    if daily is None:
+        return DEFAULT_STATUS
 
-    if t in EMA_EXIT_TYPE_MAP:
-        return EMA_EXIT_TYPE_MAP[t]
+    exit_signal = (
+        (daily["close"] < daily["ema10"] and daily["prev_close"] < daily["prev_ema10"])
+        or (daily["close"] < daily["ema21"])
+        or (daily["ema10"] < daily["ema21"])
+        or (daily["close"] < daily["ema50"])
+        or weekly_below_sma30
+    )
+    if exit_signal:
+        return "Exit"
 
-    if cmp_value < ema30:
-        return "EMA30"
-    elif cmp_value < ema20:
-        return "EMA20"
-    elif cmp_value < ema10:
-        return "EMA10"
-    else:
-        return "noworries"
+    entry_signal = (
+        weekly_sma_rising
+        and daily["close"] > daily["ema10"]
+        and daily["ema10"] > daily["ema21"]
+        and daily["ema21"] > daily["ema50"]
+    )
+    if entry_signal:
+        return "Entry"
+
+    return DEFAULT_STATUS
+
+
+def get_daily_signals(ticker):
+    """
+    Fetches daily candles and returns the latest + previous day's close
+    and EMA10, plus latest EMA21/EMA50 — everything compute_status()
+    needs. Returns None if there's not enough daily history to compute
+    a stable EMA50 (needs a meaningful warm-up period, not just 50 bars).
+    """
+    try:
+        df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
+        if df is None or len(df) < 55:
+            return None
+
+        df["EMA10"] = df["Close"].ewm(span=10, adjust=False).mean()
+        df["EMA21"] = df["Close"].ewm(span=21, adjust=False).mean()
+        df["EMA50"] = df["Close"].ewm(span=50, adjust=False).mean()
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        return {
+            "close": latest["Close"],
+            "prev_close": prev["Close"],
+            "ema10": latest["EMA10"],
+            "prev_ema10": prev["EMA10"],
+            "ema21": latest["EMA21"],
+            "ema50": latest["EMA50"],
+        }
+    except Exception as e:
+        print(f"  -> daily signal fetch failed: {e}")
+        return None
 
 
 def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT):
     """
     Runs Weinstein Stage Analysis for a single symbol on weekly data.
-    Returns a dict with the latest CMP + Stage always (so callers can write
-    it back to the Sheet), plus full detail when the stock is Stage 2.
+    Returns a dict with the latest CMP + Stage + Entry/Hold/Exit status
+    always (so callers can write it back to the Sheet), plus full detail
+    when the stock is Stage 2.
     """
     try:
         yf_symbol = f"{symbol}.NS"
@@ -95,9 +141,6 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
             return None
 
         df["SMA30"] = df["Close"].rolling(ma_length).mean()
-        df["EMA10"] = df["Close"].ewm(span=10, adjust=False).mean()
-        df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
-        df["EMA30"] = df["Close"].ewm(span=30, adjust=False).mean()
         df = df.dropna()
 
         trend = "down"
@@ -135,6 +178,11 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
         weekly_close = round(latest["Close"], 2)
         stage = latest["Stage"]
 
+        # These two weekly checks feed compute_status() below, and are
+        # needed for every stock regardless of stage — not just Stage 2.
+        weekly_sma_rising = latest["SMA30"] > df.iloc[-2]["SMA30"]
+        weekly_below_sma30 = latest["Close"] < latest["SMA30"]
+
         # cmp should reflect the actual current/live market price, not the
         # latest weekly candle's close — those can differ meaningfully
         # (the current week's candle isn't finalized yet, or the stock
@@ -152,25 +200,27 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
         except Exception:
             pass  # keep weekly_close as the fallback
 
+        # Daily data drives the Entry/Hold/Exit status — separate fetch
+        # from the weekly data above, since they're different timeframes
+        # answering different questions (weekly = long-term stage,
+        # daily = short-term entry/exit timing).
+        daily_signals = get_daily_signals(ticker)
+        status = compute_status(weekly_sma_rising, weekly_below_sma30, daily_signals)
+
         result = {
             "Sector": sector,
             "Company": company,
             "Symbol": symbol,
             "CMP": cmp,
             "Stage": stage,
+            "Status": status,
             "is_stage2": stage == "Stage 2",
-            # Weekly EMAs — exit-signal reference (e.g. price closing below
-            # EMA30 is a common weekly exit trigger). Written back to the
-            # Sheet for every symbol scanned, not just Stage 2 hits.
-            "EMA10": round(latest["EMA10"], 2),
-            "EMA20": round(latest["EMA20"], 2),
-            "EMA30": round(latest["EMA30"], 2),
         }
 
         if stage == "Stage 2":
             sma30 = round(latest["SMA30"], 2)
             pct_above_sma = round(((cmp - sma30) / sma30) * 100, 2)
-            sma_rising = latest["SMA30"] > df.iloc[-2]["SMA30"]
+            sma_rising = weekly_sma_rising
             high52 = df["High"].tail(52).max()
             pct_from_high = round(((cmp - high52) / high52) * 100, 2)
             avg_volume = df["Volume"].tail(10).mean()
@@ -196,7 +246,7 @@ def analyze_stock(symbol, ma_length=MA_LENGTH, within_range_pct=WITHIN_RANGE_PCT
 def run_scan(notify=True, generate_csv=False):
     """
     Runs the full scan over every holding in the Google Sheet.
-    Writes cmp/stage/emaexit back for every symbol scanned (Stage 2 or
+    Writes cmp/stage/status back for every symbol scanned (Stage 2 or
     not), regardless of generate_csv/notify — but all in ONE batched
     Sheets API call at the end, not one call per cell per stock.
     Sends a Telegram summary table if notify=True.
@@ -223,16 +273,11 @@ def run_scan(notify=True, generate_csv=False):
         if result is None:
             continue
 
-        emaexit = compute_emaexit(
-            holding.get("Type"), result["CMP"],
-            result["EMA10"], result["EMA20"], result["EMA30"],
-        )
-
         sheet_updates.append({
             "symbol": symbol,
             "cmp": result["CMP"],
             "stage": result["Stage"],
-            "emaexit": emaexit,
+            "status": result["Status"],
         })
 
         if result["is_stage2"]:
@@ -308,16 +353,13 @@ def run_watchlist_scan(notify=True, generate_csv=False):
             print(f"  -> no result for {symbol}, cmp/stage not updated this run")
             continue
 
-        # Watchlist symbols have no Type field, so this always goes
-        # through compute_emaexit's cascade path (EMA30 -> EMA20 -> EMA10
-        # -> "noworries") rather than the swg/pos/lt direct mapping.
-        emaexit = compute_emaexit(None, result["CMP"], result["EMA10"], result["EMA20"], result["EMA30"])
-
+        # Status is computed identically here as for holdings — it never
+        # depended on Type in the first place, just weekly + daily signals.
         sheet_updates.append({
             "symbol": symbol,
             "cmp": result["CMP"],
             "stage": result["Stage"],
-            "emaexit": emaexit,
+            "status": result["Status"],
         })
 
         if result["is_stage2"]:

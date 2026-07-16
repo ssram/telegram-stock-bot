@@ -88,25 +88,47 @@ One spreadsheet, two tabs.
 | `stage` | Auto (`/ss`) | Weinstein stage, updated on each scan |
 | `Type` | User | e.g. LongTerm, Swing |
 | `target` | User (`/ustgt`) | Target price, optional — used by `/lstg` |
-| `emaexit` | Auto (`/ss`) | Exit-signal reference — see below for how it's chosen |
+| `status` | Auto (`/ss`) | `Entry` / `Hold` / `Exit` — see below for the rule. Default: `Hold` |
+| `marketCap` | Auto (add time only) | `Large Cap` / `Mid Cap` / `Small Cap` / `Unknown` — approximate INR value bands (see below), **not** SEBI's official rank-based classification. Set once at `/as` time, not refreshed by `/ss` |
+| `coreSatellite` | User (`/uscs`) | `Core` or `Satellite`, optional — a portfolio-construction label, not used by any automated logic |
 
-**How `emaexit` is chosen** (in `weinstein_scanner.py`'s `compute_emaexit()`):
-the stock's `Type` field determines which weekly EMA to use, matched
-case-insensitively. The cell stores a **label** (e.g. `EMA20`), not the
-EMA's numeric value — easier to scan at a glance than a price number:
+**How `status` is chosen** (in `weinstein_scanner.py`'s `compute_status()`):
+based on a mix of weekly signals (already computed for stage
+classification) and **daily** signals (a separate fetch, just for this).
+`status` no longer depends on `Type` at all — it's a pure technical rule.
 
-| Type value | emaexit stored | Condition |
-|---|---|---|
-| `swg` | `"EMA10"` | Always — no crossing check |
-| `pos` | `"EMA20"` | Always — no crossing check |
-| `lt` | `"EMA30"` | Always — no crossing check |
-| anything else (blank, `Unknown`, typos) | cascading check | EMA30 first: if `cmp < EMA30`, store `"EMA30"`. Else EMA20: if `cmp < EMA20`, store `"EMA20"`. Else EMA10: if `cmp < EMA10`, store `"EMA10"`. If price is above all three, stores `"noworries"` |
+Checked in this order — Exit first, then Entry, otherwise Hold:
 
-"Crossed"/condition here means the current price has fallen *below*
-that EMA — a bearish/exit warning signal, not a bullish one. This same
-`compute_emaexit()` function is reused for the Watchlist tab too (see
-below) — always via the cascade path there, since watchlist symbols
-have no `Type` field.
+| Status | Condition |
+|---|---|
+| `Exit` | **Any** of: (a) daily close below EMA10 for 2 consecutive days, (b) daily close below EMA21, (c) daily EMA10 < daily EMA21, (d) daily close below EMA50, (e) weekly close below the 30-week MA |
+| `Entry` | **All** of (only checked if no Exit condition fired): (a) weekly 30W MA is rising, (b) daily close > daily EMA10, (c) daily EMA10 > daily EMA21, (d) daily EMA21 > daily EMA50 |
+| `Hold` | Neither of the above — the default, and also the fallback if daily data couldn't be fetched |
+
+This means `/ss` now fetches **two** separate yfinance datasets per
+stock — weekly (for stage) and daily (for status) — roughly doubling
+the API calls per stock compared to before. Worth watching if you have
+a large holdings list (see Known Limitations).
+
+**How `marketCap` is chosen** (in `sheets.py`'s `categorize_market_cap()`):
+fetched once at `/as` time from yfinance's raw `marketCap` figure (in
+INR), converted to crores and bucketed by value:
+
+| Market cap (crore) | Category |
+|---|---|
+| >= 20,000 | `Large Cap` |
+| 5,000 – 19,999 | `Mid Cap` |
+| < 5,000 | `Small Cap` |
+| missing/zero | `Unknown` |
+
+This is an approximation using fixed value bands — it is **not** SEBI's
+official classification, which ranks companies by relative market cap
+(top 100 = large cap, 101-250 = mid cap, etc.) rather than a fixed
+rupee threshold. Since yfinance doesn't expose that ranking, this is the
+closest practical substitute. Not refreshed automatically — if a
+company's market cap moves across a threshold later, the stored
+category won't update on its own (would need to be manually corrected
+or the stock re-added).
 
 ### Watchlist tab (auto-created on first use)
 
@@ -118,7 +140,7 @@ have no `Type` field.
 | `industry` | Auto (yfinance) | |
 | `cmp` | Auto (`/sw`) | |
 | `stage` | Auto (`/sw`) | |
-| `emaexit` | Auto (`/sw`) | Same cascade rule as Holdings (EMA30 → EMA20 → EMA10 → `noworries`) — always the cascade path, since there's no `Type` field here to trigger the swg/pos/lt direct mapping |
+| `status` | Auto (`/sw`) | Same rule as Holdings — identical `compute_status()` call, since the rule never depended on `Type` |
 
 No `quantity`/`price`/`stoploss`/`Type` on the Watchlist tab —
 these aren't positions, just symbols being tracked.
@@ -149,15 +171,18 @@ differ, especially mid-week before the current week's candle finalizes.
 | `/as` | `/as SYMBOL QTY PRICE STOPLOSS TYPE` | Add a stock |
 | `/ds` | `/ds SYMBOL` | Delete a stock |
 | `/us` | `/us SYMBOL FIELD VALUE` | Update any field (`quantity`, `price`, `stoploss`, `Type`, `target`) |
-| `/usqty` | `/usqty SYMBOL VALUE` | Update quantity only |
+| `/usqty` | `/usqty SYMBOL VALUE` | Update quantity only (sets it directly, overwriting) |
+| `/usqtyadd` | `/usqtyadd SYMBOL VALUE` | Add VALUE to the existing quantity (e.g. topping up a position) |
+| `/usqtysub` | `/usqtysub SYMBOL VALUE` | Subtract VALUE from the existing quantity (e.g. partial exit). Rejected if it would go negative — no change made in that case |
 | `/usbuy` | `/usbuy SYMBOL VALUE` | Update buy price only |
 | `/ussl` | `/ussl SYMBOL VALUE` | Update stoploss only |
 | `/usit` | `/usit SYMBOL VALUE` | Update Type only |
 | `/ustgt` | `/ustgt SYMBOL VALUE` | Update target price only |
+| `/uscs` | `/uscs SYMBOL core\|satellite` | Set the Core/Satellite classification — only accepts exactly `core` or `satellite` (case-insensitive) |
 | `/qssl` | `/qssl SYMBOL` | Query the current stoploss for a stock |
 | `/lssl` | `/lssl [ss]` | List holdings where `cmp <= stoploss`. `ss` refreshes cmp/stage first |
 | `/lstg` | `/lstg [ss]` | List holdings where `cmp > target` (skips stocks with no target set). `ss` refreshes cmp/stage first |
-| `/it` | `/it [ss]` | List holdings whose `emaexit` is not `noworries` — i.e. an exit signal has triggered — grouped by `Type`. `ss` refreshes cmp/stage/emaexit first |
+| `/it` | `/it [ss]` | List holdings whose `status` is not `Hold` (i.e. `Entry` or `Exit`), grouped by status. `ss` refreshes cmp/stage/status first |
 | `/ss` | `/ss [csv]` | Scan holdings, write back `cmp`/`stage` for every symbol, post summary table (CSV optional) |
 | `/ls` | `/ls [ss] [csv]` | List all holdings, ascending, as a table. `ss` refreshes cmp/stage first (silent scan); `csv` also attaches a full CSV |
 | `/lsstg` | `/lsstg` | List holdings grouped by stage (one table per stage, each with a count) |
@@ -247,24 +272,35 @@ Cloudflare dashboard:
 
 ---
 
-## 6.5. Migrating an existing Sheet (adding new columns)
+## 6.5. Migrating an existing Sheet (adding/renaming columns)
 
-If your Holdings tab was created before `target`/`emaexit` were added,
-add them manually: open the Sheet, and after the last existing column,
-add these headers in order — `target`, `emaexit` — exact spelling and
-case matter, since they're compared against `sheets.py`'s `COLUMNS`
-list. Existing rows can be left blank in these columns; they'll be
-filled in automatically by the next `/ss` run (for `emaexit`) or
-manually via `/ustgt` (for `target`).
+If your Holdings tab was created before `target`/`status`/`marketCap`/
+`coreSatellite` were added, add them manually: open the Sheet, and
+after the last existing column, add these headers **in this exact
+order** — `target`, `status`, `marketCap`, `coreSatellite` — exact
+spelling and case matter, since they're compared against `sheets.py`'s
+`COLUMNS` list. Existing rows can be left blank; `status` fills in on
+the next `/ss`, `coreSatellite` via `/uscs` per stock. `marketCap` is
+only ever set at `/as` (add) time — for stocks already in the sheet
+before this column existed, it'll stay blank unless you fill it in
+manually (there's no bulk-backfill command).
+list. Existing rows can be left blank; they'll be filled in
+automatically by the next `/ss` run (for `status`) or manually via
+`/ustgt` (for `target`).
+
+**If you previously had an `emaexit` column** (from an earlier version
+of this bot): rename that header to `status` — the old EMA-label values
+(`EMA10`/`EMA20`/`noworries`/etc.) will look stale until the next `/ss`
+run overwrites them with real `Entry`/`Hold`/`Exit` values, which is
+harmless, just cosmetically odd for one cycle.
 
 Since the header-mismatch check is non-destructive (see Security below),
 forgetting this step won't corrupt anything — it'll just print a warning
 in the Actions log and these columns will have nothing to read/write
 until they exist with the right names in the right order.
 
-The Watchlist tab similarly needs an `emaexit` column added after
-`stage`, if it was created before this was added — same non-destructive
-behavior applies there too.
+The Watchlist tab needs the same treatment — add/rename to `status`
+after `stage`, if it was created before this was added.
 
 ## 7. Setting up the event-driven pipeline (one-time)
 
@@ -354,6 +390,9 @@ shared resources regardless of which branch or trigger ran the code.
 
 ## 10. Known limitations
 
+- **`/ss`/`/sw` fetch two datasets per stock now**: weekly (for stage)
+  and daily (for `status`). This roughly doubles yfinance calls per
+  stock — worth watching for rate-limiting on larger holdings lists.
 - **Sender name display**: Telegram's `username` (public `@handle`) only
   exists if the sender has explicitly set one in their account. The
   Cloudflare Worker falls back to `first_name`, then the literal string

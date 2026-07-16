@@ -7,7 +7,7 @@ Sheet columns (in this exact order — row 1 must be a header row with these
 names):
 
     stockName, fullname, sector, industry, quantity, price, cmp,
-    stoploss, stage, Type, target, emaexit
+    stoploss, stage, Type, target, status, marketCap, coreSatellite
 
 - stockName : NSE symbol, e.g. RELIANCE (this is the unique key for lookups)
 - fullname  : Company full name (auto-filled from yfinance)
@@ -20,9 +20,17 @@ names):
 - stage     : Weinstein stage, e.g. "Stage 2" (auto-updated on each /ss)
 - Type      : e.g. "LongTerm" / "Swing" / "Positional" (user-provided)
 - target    : Target price (user-provided, optional — set via /ustgt)
-- emaexit   : Weekly EMA used as an exit-signal reference (auto-updated on
-              each /ss). Which EMA (10/20/30) is picked depends on the
-              stock's Type — see EMA_EXIT_MAP in weinstein_scanner.py.
+- status    : Entry / Hold / Exit, based on daily + weekly technical
+              rules (auto-updated on each /ss). Default: Hold.
+              See compute_status() in weinstein_scanner.py for the rules.
+- marketCap : Large Cap / Mid Cap / Small Cap / Unknown — auto-filled at
+              add time from yfinance's marketCap, using approximate INR
+              value bands (NOT SEBI's official rank-based classification,
+              since per-company rank isn't available via yfinance):
+              Large Cap >= 20,000 Cr, Mid Cap 5,000-20,000 Cr,
+              Small Cap < 5,000 Cr. See categorize_market_cap() below.
+- coreSatellite : "Core" or "Satellite" (user-provided, optional — set
+              via /uscs SYMBOL core|satellite)
 """
 
 import os
@@ -37,11 +45,12 @@ SCOPES = [
 
 COLUMNS = [
     "stockName", "fullname", "sector", "industry", "quantity",
-    "price", "cmp", "stoploss", "stage", "Type", "target", "emaexit",
+    "price", "cmp", "stoploss", "stage", "Type", "target", "status",
+    "marketCap", "coreSatellite",
 ]
 
 WATCHLIST_TAB_NAME = "Watchlist"
-WATCHLIST_COLUMNS = ["stockName", "fullname", "sector", "industry", "cmp", "stage", "emaexit"]
+WATCHLIST_COLUMNS = ["stockName", "fullname", "sector", "industry", "cmp", "stage", "status"]
 
 _sheet_cache = None
 _spreadsheet_cache = None
@@ -132,8 +141,29 @@ def _find_row(sheet, symbol):
     return None
 
 
+def categorize_market_cap(market_cap):
+    """
+    Classifies a raw market cap (in INR, as returned by yfinance) into
+    Large/Mid/Small Cap using approximate value bands — NOT SEBI's
+    official rank-based classification (per-company market rank isn't
+    available via yfinance, only the raw market cap figure).
+      Large Cap: >= 20,000 Cr
+      Mid Cap:   5,000-20,000 Cr
+      Small Cap: < 5,000 Cr
+    """
+    if not market_cap:
+        return "Unknown"
+    crore = market_cap / 1e7  # 1 crore = 1e7
+    if crore >= 20000:
+        return "Large Cap"
+    elif crore >= 5000:
+        return "Mid Cap"
+    else:
+        return "Small Cap"
+
+
 def get_company_info(symbol):
-    """Fetches fullname/sector/industry from yfinance for a fresh add."""
+    """Fetches fullname/sector/industry/marketCap from yfinance for a fresh add."""
     import yfinance as yf
     try:
         ticker = yf.Ticker(f"{symbol}.NS")
@@ -142,14 +172,20 @@ def get_company_info(symbol):
             "fullname": info.get("longName", symbol),
             "sector": info.get("sector", "Unknown"),
             "industry": info.get("industry", "Unknown"),
+            "marketCap": categorize_market_cap(info.get("marketCap")),
         }
     except Exception:
-        return {"fullname": symbol, "sector": "Unknown", "industry": "Unknown"}
+        return {
+            "fullname": symbol, "sector": "Unknown", "industry": "Unknown",
+            "marketCap": "Unknown",
+        }
 
 
 def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown", target=""):
     """Adds a new stock row. Returns a status message string.
-    target defaults to blank — set it afterward via /ustgt SYMBOL VALUE."""
+    target defaults to blank — set it afterward via /ustgt SYMBOL VALUE.
+    marketCap is auto-classified from yfinance at add time.
+    coreSatellite defaults to blank — set it afterward via /uscs."""
     sheet = get_sheet()
     symbol = symbol.strip().upper()
 
@@ -170,10 +206,13 @@ def add_stock(symbol, quantity=0, price=0, stoploss=0, invest_type="Unknown", ta
         "",   # stage — filled on next /ss
         invest_type,
         target,
-        "",   # emaexit — filled on next /ss
+        "Hold",   # status — default; recomputed on next /ss (kept in sync with
+                  # weinstein_scanner.py's DEFAULT_STATUS)
+        info["marketCap"],   # marketCap — auto-classified, set once at add time
+        "",   # coreSatellite — user sets via /uscs
     ]
     sheet.append_row(row)
-    return f"✅ Added {symbol} ({info['fullname']}, {info['sector']})"
+    return f"✅ Added {symbol} ({info['fullname']}, {info['sector']}, {info['marketCap']})"
 
 
 def update_stock(symbol, **fields):
@@ -236,14 +275,14 @@ def get_all_symbols():
 
 def batch_update_holdings(updates):
     """
-    Writes cmp/stage/emaexit for MANY stocks in a SINGLE Sheets API call,
+    Writes cmp/stage/status for MANY stocks in a SINGLE Sheets API call,
     instead of one update_cell() call per field per stock. This is what
     avoids Google Sheets' write-quota (60 writes/minute/user) — the old
     per-cell approach could hit that quota with as few as ~15-20 stocks
     in one scan.
 
     updates: list of dicts, each with keys:
-      symbol (required), cmp, stage, emaexit (all optional — only
+      symbol (required), cmp, stage, status (all optional — only
       fields present are written).
     """
     if not updates:
@@ -263,7 +302,7 @@ def batch_update_holdings(updates):
     field_columns = {
         "cmp": COLUMNS.index("cmp") + 1,
         "stage": COLUMNS.index("stage") + 1,
-        "emaexit": COLUMNS.index("emaexit") + 1,
+        "status": COLUMNS.index("status") + 1,
     }
 
     data = []
@@ -298,7 +337,7 @@ def add_watchlist_stock(symbol):
 
     info = get_company_info(symbol)
 
-    row = [symbol, info["fullname"], info["sector"], info["industry"], "", "", ""]
+    row = [symbol, info["fullname"], info["sector"], info["industry"], "", "", "Hold"]
     sheet.append_row(row)
     return f"✅ Added {symbol} ({info['fullname']}) to watchlist."
 
@@ -359,7 +398,7 @@ def batch_update_watchlist(updates):
     field_columns = {
         "cmp": WATCHLIST_COLUMNS.index("cmp") + 1,
         "stage": WATCHLIST_COLUMNS.index("stage") + 1,
-        "emaexit": WATCHLIST_COLUMNS.index("emaexit") + 1,
+        "status": WATCHLIST_COLUMNS.index("status") + 1,
     }
 
     data = []
